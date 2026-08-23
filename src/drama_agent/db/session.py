@@ -3,7 +3,7 @@ from drama_agent.config import settings
 from drama_agent.db.models import Base
 import asyncio
 
-engine = create_async_engine(settings.database_url, echo=settings.debug)
+engine = create_async_engine(settings.database_url, echo=settings.db_echo)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

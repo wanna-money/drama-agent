@@ -6,7 +6,8 @@ from drama_agent.services.storage_service import storage_service
 
 async def video_assembler_node(state: DramaState) -> dict:
     project_id = state["project_id"]
-    output_dir = storage_service.get_project_output_dir(project_id)
+    episode_id = state["episode_id"]
+    output_dir = storage_service.get_project_output_dir(project_id, episode_id)
 
     # Collect successful videos in shot order
     shot_order = {s["shot_id"]: i for i, s in enumerate(state["shots"])}

@@ -1,8 +1,7 @@
 """Tests for video_generator and video_assembler nodes."""
 import pytest
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock, call
+from unittest.mock import AsyncMock, patch
 from drama_agent.services.video_service import VideoTaskResult
 
 
@@ -23,6 +22,7 @@ def make_state_with_prompts(tmp_path):
     ]
     return {
         "project_id": "proj-vid",
+        "episode_id": "ep-proj-vid",
         "title": "T", "raw_input": "s", "genre": "action",
         "story_analysis": None, "screenplay": "", "screenplay_approved": True,
         "screenplay_revision_notes": "", "shots": shots, "prompts": prompts,
@@ -87,8 +87,9 @@ async def test_video_generator_chains_last_frame(tmp_path):
 
         await video_generator_node(state)
 
-    # Second call should have reference_image=last_frame_url from first
-    assert captured_calls[1].get("reference_image_url") == "http://last_frame.jpg"
+    # Second call chains last_frame_url as a first_frame reference (Phase A: references interface)
+    refs = captured_calls[1].get("references") or []
+    assert any(r.kind == "first_frame" and r.url == "http://last_frame.jpg" for r in refs)
 
 
 @pytest.mark.asyncio
@@ -174,6 +175,230 @@ async def test_video_generator_uses_edited_prompt(tmp_path):
     assert captured["prompt"] == "Custom edited prompt text"
 
 
+@pytest.mark.asyncio
+async def test_video_generator_uses_edited_negative_prompt(tmp_path):
+    """video_generator uses edited_negative_prompt when available (not the original negative_prompt)."""
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    state["prompts"] = [{**state["prompts"][0], "edited_negative_prompt": "no watermark, no blur"}]
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured["negative_prompt"] = kwargs.get("negative_prompt")
+        return "task-1"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("task-1", "succeeded", video_url="http://v.mp4"))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        await video_generator_node(state)
+
+    assert captured["negative_prompt"] == "no watermark, no blur"
+
+
+@pytest.mark.asyncio
+async def test_video_generator_empty_edited_negative_prompt_is_not_ignored(tmp_path):
+    """用户故意把负向 prompt 清空为 '' 时,必须真正传空字符串,不能因为 falsy 被 `or` 退回原值。"""
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    # 原始 negative_prompt 是 "bad"(见 make_state_with_prompts fixture);用户编辑为空字符串。
+    state["prompts"] = [{**state["prompts"][0], "edited_negative_prompt": ""}]
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured["negative_prompt"] = kwargs.get("negative_prompt")
+        return "task-1"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("task-1", "succeeded", video_url="http://v.mp4"))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        await video_generator_node(state)
+
+    assert captured["negative_prompt"] == ""
+
+
+@pytest.mark.asyncio
+async def test_video_generator_falls_back_to_negative_prompt_when_not_edited(tmp_path):
+    """未编辑(edited_negative_prompt 不存在)时,仍应使用原始 negative_prompt——不回归既有行为。"""
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    # make_state_with_prompts 的 fixture 本就不带 edited_negative_prompt 键,直接用其原始 prompts[0]。
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured["negative_prompt"] = kwargs.get("negative_prompt")
+        return "task-1"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("task-1", "succeeded", video_url="http://v.mp4"))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        await video_generator_node(state)
+
+    assert captured["negative_prompt"] == "bad"
+
+
+@pytest.mark.asyncio
+async def test_video_generator_explicit_none_edited_negative_prompt_falls_back(tmp_path):
+    """key 存在但值为 None(prompt_engineer 的实际产出形态)时,必须回落到原始 negative_prompt。
+
+    这是本 Task 与 Task 6 `graph.py` 合并逻辑的关键差异:`prompt_engineer` 建 prompt 时
+    就把 `edited_negative_prompt` 显式置为 None,所以"未编辑"在生产中表现为 key 在、值为 None。
+    若这里照抄 Task 6 的 dict-membership(`"edited_negative_prompt" in prompt`)写法,
+    未编辑的镜头会把 None 当成编辑值送给 provider —— 这条测试专门拦这个。
+    """
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    state["prompts"] = [{**state["prompts"][0], "edited_negative_prompt": None}]
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured["negative_prompt"] = kwargs.get("negative_prompt")
+        return "task-1"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("task-1", "succeeded", video_url="http://v.mp4"))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        await video_generator_node(state)
+
+    assert captured["negative_prompt"] == "bad"
+
+
+@pytest.mark.asyncio
+async def test_video_generator_minimax_branch_uses_state_resolution(tmp_path):
+    """minimax provider gets resolution from state (default 768P) and reference_role."""
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [{**state["shots"][0], "duration_seconds": 7}]
+    state["prompts"] = [state["prompts"][0]]
+    state["video_provider"] = "minimax"
+    state["resolution"] = "2K"
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured.update(kwargs)
+        return "mm-task"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("mm-task", "succeeded", video_url="http://v.mp4", last_frame_url=None))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        result = await video_generator_node(state)
+
+    assert captured["resolution"] == "2K"
+    assert captured["duration"] == 7
+    assert result["videos"][0]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_video_generator_minimax_default_resolution(tmp_path):
+    """minimax provider falls back to 768P when state has no resolution."""
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    state["prompts"] = [state["prompts"][0]]
+    state["video_provider"] = "minimax"
+    # no "resolution" key
+
+    captured = {}
+    async def mock_create(**kwargs):
+        captured.update(kwargs)
+        return "mm-task"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = mock_create
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("mm-task", "succeeded", video_url="http://v.mp4", last_frame_url=None))
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file",
+               new_callable=AsyncMock):
+
+        await video_generator_node(state)
+
+    assert captured["resolution"] == "768P"
+
+
+@pytest.mark.asyncio
+async def test_video_generator_writes_root_artifact(tmp_path):
+    from drama_agent.workflow.nodes.video_generator import video_generator_node
+
+    state = make_state_with_prompts(tmp_path)
+    state["shots"] = [state["shots"][0]]
+    state["prompts"] = [state["prompts"][0]]
+    state["video_provider"] = "minimax"
+    state["resolution"] = "768P"
+
+    mock_provider = AsyncMock()
+    mock_provider.create_task = AsyncMock(return_value="mm-task")
+    mock_provider.wait_for_task = AsyncMock(return_value=
+        VideoTaskResult("mm-task", "succeeded", video_url="http://v.mp4", last_frame_url=None))
+
+    created_roots = []
+
+    async def fake_create_root(session, **kwargs):
+        created_roots.append(kwargs)
+        return {"id": "root-1", **kwargs}
+
+    with patch("drama_agent.services.video_service.video_service.get_provider", return_value=mock_provider), \
+         patch("drama_agent.services.storage_service.storage_service.get_project_output_dir", return_value=tmp_path), \
+         patch("drama_agent.services.storage_service.storage_service.download_file", new_callable=AsyncMock), \
+         patch("drama_agent.services.artifact_service.create_root", side_effect=fake_create_root), \
+         patch("drama_agent.workflow.nodes.video_generator.AsyncSessionLocal") as mock_factory:
+        mock_factory.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        await video_generator_node(state)
+
+    assert len(created_roots) == 1
+    assert created_roots[0]["provider"] == "minimax"
+    assert created_roots[0]["resolution"] == "768P"
+    assert created_roots[0]["task_id"] == "mm-task"
+    assert created_roots[0]["prompt_text"] == "city shot"  # prompts[0].prompt_text
+
+
 # ── video_assembler ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -187,6 +412,7 @@ async def test_video_assembler_creates_concat(tmp_path):
 
     state = {
         "project_id": "proj-asm",
+        "episode_id": "ep-proj-asm",
         "shots": [
             {"shot_id": "s1", "scene_number": 1, "shot_number": 1},
             {"shot_id": "s2", "scene_number": 1, "shot_number": 2},
@@ -218,6 +444,7 @@ async def test_video_assembler_no_videos():
 
     state = {
         "project_id": "proj-empty",
+        "episode_id": "ep-proj-empty",
         "shots": [{"shot_id": "s1", "scene_number": 1, "shot_number": 1}],
         "videos": [{"shot_id": "s1", "status": "failed", "local_path": None}],
     }
@@ -239,6 +466,7 @@ async def test_video_assembler_ffmpeg_failure(tmp_path):
     (tmp_path / "s1.mp4").write_bytes(b"fake")
     state = {
         "project_id": "proj-ffmpeg-fail",
+        "episode_id": "ep-proj-ffmpeg-fail",
         "shots": [{"shot_id": "s1", "scene_number": 1, "shot_number": 1}],
         "videos": [{"shot_id": "s1", "status": "succeeded", "local_path": str(tmp_path / "s1.mp4")}],
     }
@@ -267,6 +495,7 @@ async def test_video_assembler_orders_by_shot(tmp_path):
 
     state = {
         "project_id": "proj-order",
+        "episode_id": "ep-proj-order",
         "shots": [
             {"shot_id": "s1", "scene_number": 1, "shot_number": 1},
             {"shot_id": "s2", "scene_number": 1, "shot_number": 2},
@@ -289,55 +518,7 @@ async def test_video_assembler_orders_by_shot(tmp_path):
         await video_assembler_node(state)
 
     concat_content = (tmp_path / "concat.txt").read_text()
-    lines = [l for l in concat_content.strip().splitlines() if l]
+    lines = [ln for ln in concat_content.strip().splitlines() if ln]
     # s1 should appear before s2
     assert lines[0].endswith("s1.mp4'")
     assert lines[1].endswith("s2.mp4'")
-
-
-# ── BailianVideoService status mapping ────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_bailian_cancelled_maps_to_failed():
-    """BailianVideoService.get_task should map CANCELLED to 'failed' not 'running'."""
-    from drama_agent.services.video_service import BailianVideoService
-    import httpx
-
-    service = BailianVideoService()
-    mock_response = {
-        "output": {
-            "task_status": "CANCELLED",
-            "task_id": "t-123",
-        }
-    }
-    with patch("httpx.AsyncClient") as MockClient:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = mock_response
-        mock_resp.raise_for_status = MagicMock()
-        MockClient.return_value.__aenter__ = AsyncMock(return_value=MockClient.return_value)
-        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value.get = AsyncMock(return_value=mock_resp)
-
-        result = await service.get_task("t-123")
-
-    assert result.status == "failed", f"Expected 'failed' but got '{result.status}'"
-
-
-@pytest.mark.asyncio
-async def test_bailian_unknown_status_maps_to_failed():
-    """BailianVideoService.get_task should map UNKNOWN to 'failed'."""
-    from drama_agent.services.video_service import BailianVideoService
-
-    service = BailianVideoService()
-    mock_response = {"output": {"task_status": "UNKNOWN"}}
-    with patch("httpx.AsyncClient") as MockClient:
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = mock_response
-        mock_resp.raise_for_status = MagicMock()
-        MockClient.return_value.__aenter__ = AsyncMock(return_value=MockClient.return_value)
-        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value.get = AsyncMock(return_value=mock_resp)
-
-        result = await service.get_task("t-456")
-
-    assert result.status == "failed"

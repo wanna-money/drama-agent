@@ -14,12 +14,15 @@ class StorageService:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_project_output_dir(self, project_id: str) -> Path:
+    def get_project_output_dir(self, project_id: str, episode_id: str | None = None) -> Path:
         d = self.output_dir / project_id
+        if episode_id:
+            d = d / episode_id
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def get_project_image_dir(self, project_id: str, image_type: str = "reference") -> Path:
+        # 参考图按项目共享(角色跨集),不按集分层
         d = self.upload_dir / project_id / image_type
         d.mkdir(parents=True, exist_ok=True)
         return d

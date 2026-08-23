@@ -1,34 +1,28 @@
 from fastapi import WebSocket
-from typing import Any
-import json
-import asyncio
+from drama_agent.db import session as db_session
+from drama_agent.services import event_service
 
 
 class ConnectionManager:
     def __init__(self):
         self._connections: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, project_id: str, websocket: WebSocket):
+    async def connect(self, episode_id: str, websocket: WebSocket):
         await websocket.accept()
-        self._connections.setdefault(project_id, []).append(websocket)
+        self._connections.setdefault(episode_id, []).append(websocket)
 
-    def disconnect(self, project_id: str, websocket: WebSocket):
-        if project_id in self._connections:
+    def disconnect(self, episode_id: str, websocket: WebSocket):
+        if episode_id in self._connections:
             try:
-                self._connections[project_id].remove(websocket)
+                self._connections[episode_id].remove(websocket)
             except ValueError:
                 pass
 
-    async def broadcast(self, project_id: str, event_type: str, data: Any):
-        message = json.dumps({"type": event_type, "data": data})
-        dead = []
-        for ws in self._connections.get(project_id, []):
-            try:
-                await ws.send_text(message)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(project_id, ws)
-
 
 manager = ConnectionManager()
+
+
+async def backfill_events(episode_id: str, after_seq: int) -> list[dict]:
+    """读取该集自 after_seq 之后的事件(WebSocket 补拉用)。"""
+    async with db_session.AsyncSessionLocal() as s:
+        return await event_service.fetch_since(s, episode_id, after_seq)

@@ -1,15 +1,90 @@
-import asyncio
-from pathlib import Path
+import logging
+from dataclasses import asdict
+
 from drama_agent.workflow.state import DramaState, VideoDict
+from drama_agent.workflow.constants import ReferenceRole
 from drama_agent.services.video_service import video_service
+from drama_agent.services.video_refs import RefImage, RefKind, RefAudio, cap_audio_refs
+from drama_agent.services.ref_delivery import inline_local_refs
 from drama_agent.services.storage_service import storage_service
+from drama_agent.db.session import AsyncSessionLocal
+from drama_agent.services import artifact_service
+from drama_agent.services import usage_service
+
+logger = logging.getLogger(__name__)
+
+
+async def _subject_refs_for_shot(project_id: str, shot: dict, look_assignments: dict) -> list[RefImage]:
+    """名字-join → 本场景指派 Look(缺省默认)→ 该 Look 各视图 → subject RefImage。
+
+    join 不到 Character / Look 无图 → 空(降级为仅文本一致)。失败不阻断。
+    """
+    from drama_agent.services import character_entity_service as ce
+    scene = str(shot.get("scene_number", 1))
+    refs: list[RefImage] = []
+    for name in shot.get("characters", []):
+        try:
+            ch = await ce.get_character_by_name(project_id, name)
+            if ch is None:
+                continue
+            looks = await ce.list_looks(ch.id)
+            if not looks:
+                continue
+            assigned = (look_assignments.get(scene) or {}).get(name)
+            look = next((lk for lk in looks if lk.id == assigned), None) \
+                or next((lk for lk in looks if getattr(lk, "is_default", False)), looks[0])
+            views = (("front", look.front_key), ("side", look.side_key), ("back", look.back_key))
+            for view, key in views:
+                if key:
+                    refs.append(RefImage(
+                        url=f"/api/characters/view/{key}", kind="subject",
+                        subject_name=name, view=view))
+        except Exception:  # noqa: BLE001 — 单角色解析失败不阻断
+            continue
+    return refs
+
+
+async def _audio_refs_for_shot(project_id: str, shot: dict) -> list[RefAudio]:
+    """镜头出场角色各取各自音色(voice_key);无音色/join 失败跳过,不阻断。"""
+    from drama_agent.services import character_entity_service as ce
+    out: list[RefAudio] = []
+    for name in shot.get("characters", []):
+        try:
+            ch = await ce.get_character_by_name(project_id, name)
+            if ch is None or not getattr(ch, "voice_key", None):
+                continue
+            out.append(RefAudio(url=f"/api/characters/voice/{ch.voice_key}", subject_name=name))
+        except Exception:  # noqa: BLE001 — 单角色解析失败不阻断
+            continue
+    return out
+
+
+async def _resolve_audio_refs(
+    provider_name: str, project_id: str, shot: dict, references: list[RefImage]
+) -> list[RefAudio]:
+    """能力门控(supports_audio_reference)+ 上限截断(max_reference_audios)+ 互斥降级。"""
+    from drama_agent import provider as provider_pkg
+    try:
+        _, vmodel = provider_pkg.provider_registry.resolve_model(provider_name)
+    except Exception:  # noqa: BLE001 — 未知 provider → 不挂音频
+        return []
+    if vmodel is None or not vmodel.supports_audio_reference:
+        return []
+    audio_refs = await _audio_refs_for_shot(project_id, shot)
+    audio_refs = cap_audio_refs(audio_refs, vmodel.max_reference_audios, provider_name)
+    if audio_refs and not references:
+        logger.warning("shot has audio but no image refs; dropping audio (provider=%s)", provider_name)
+        return []
+    return audio_refs
 
 
 async def video_generator_node(state: DramaState) -> dict:
     provider_name = state.get("video_provider", "seedance")
     provider = video_service.get_provider(provider_name)
+    resolution = state.get("resolution")
     project_id = state["project_id"]
-    output_dir = storage_service.get_project_output_dir(project_id)
+    episode_id = state["episode_id"]
+    output_dir = storage_service.get_project_output_dir(project_id, episode_id)
 
     # Use approved/edited prompts
     prompts = state["prompts"]
@@ -34,16 +109,37 @@ async def video_generator_node(state: DramaState) -> dict:
             last_frame_url = existing[shot_id].get("last_frame_url")
             continue
 
-        shot = shots.get(shot_id, {})
+        shot: dict = dict(shots.get(shot_id) or {})
 
         # Final prompt text (use human-edited if available)
         final_prompt = prompt.get("edited_prompt") or prompt["prompt_text"]
 
-        # Continuity: chain last frame to next shot's first frame
-        ref_image = prompt.get("reference_image_url")
-        ref_role = prompt.get("reference_role", "first_frame")
-        if last_frame_url and ref_role == "first_frame":
-            ref_image = last_frame_url
+        # Final negative prompt (use human-edited if present — is not None, NOT truthy,
+        # so an intentional "" clears the negative prompt instead of falling back to the original)
+        edited_neg = prompt.get("edited_negative_prompt")
+        final_negative_prompt = (
+            edited_neg if edited_neg is not None else prompt.get("negative_prompt", "")
+        )
+
+        # 组装 provider 无关的语义参考图:首帧连贯(上一镜末帧)+ 角色 subject 三视图。
+        references: list[RefImage] = []
+        keyframe_url = prompt.get("keyframe_url")
+        prompt_ref = prompt.get("reference_image_url")
+        prompt_role = prompt.get("reference_role")
+        if keyframe_url:
+            references.append(RefImage(url=keyframe_url, kind="first_frame"))
+        elif prompt_ref:
+            kind: RefKind = "subject" if prompt_role == ReferenceRole.SUBJECT_REFERENCE.value else "first_frame"
+            references.append(RefImage(url=prompt_ref, kind=kind))
+        elif last_frame_url:
+            references.append(RefImage(url=last_frame_url, kind="first_frame"))
+        references.extend(
+            await _subject_refs_for_shot(project_id, shot, state.get("look_assignments") or {}))
+
+        audio_refs = await _resolve_audio_refs(provider_name, project_id, shot, references)
+        # 送达:本地图/音 ref → data URI(顺带修 subject 相对 URL 外部取不到的隐患)。
+        # 内联后的 refs 仅用于发给 provider;产物树仍存原始语义 refs(避免 base64 撑爆 DB)。
+        sent_refs, sent_audio = await inline_local_refs(references, audio_refs)
 
         video: VideoDict = {
             "shot_id": shot_id,
@@ -55,26 +151,19 @@ async def video_generator_node(state: DramaState) -> dict:
             "error": None,
         }
 
+        default_res = {"seedance": "1080p", "seedance-2.5": "1080p", "minimax": "768P"}.get(
+            provider_name, "720P")
+        duration = shot.get("duration_seconds", 5)
         try:
-            # Create task
-            if provider_name == "seedance":
-                task_id = await provider.create_task(
-                    prompt=final_prompt,
-                    duration=shot.get("duration_seconds", 5),
-                    ratio="16:9",
-                    resolution="1080p",
-                    reference_image_url=ref_image,
-                    reference_role=ref_role if ref_image else None,
-                    negative_prompt=prompt.get("negative_prompt", ""),
-                )
-            else:
-                task_id = await provider.create_task(
-                    prompt=final_prompt,
-                    duration=shot.get("duration_seconds", 5),
-                    ratio="16:9",
-                    resolution="720P",
-                    negative_prompt=prompt.get("negative_prompt", ""),
-                )
+            task_id = await provider.create_task(
+                prompt=final_prompt,
+                duration=duration,
+                ratio="16:9",
+                resolution=resolution or default_res,
+                negative_prompt=final_negative_prompt,
+                references=sent_refs,
+                audio_refs=sent_audio,
+            )
 
             video["task_id"] = task_id
             video["status"] = "running"
@@ -93,6 +182,39 @@ async def video_generator_node(state: DramaState) -> dict:
                 video["last_frame_url"] = result.last_frame_url
                 video["local_path"] = str(local_path)
                 last_frame_url = result.last_frame_url
+
+                # 记账旁路:seconds 转换失败也不得把已成功的分镜翻成 failed。
+                try:
+                    seconds = int(duration or 0)
+                except (TypeError, ValueError):
+                    seconds = 0
+                await usage_service.record_video(
+                    provider=provider_name,
+                    model=state.get("video_model", ""),
+                    seconds=seconds,
+                )
+
+                # Record the root artifact for the capability tree (non-blocking).
+                try:
+                    async with AsyncSessionLocal() as session:
+                        await artifact_service.create_root(
+                            session,
+                            episode_id=episode_id,
+                            project_id=project_id,
+                            shot_id=shot_id,
+                            provider=provider_name,
+                            model=state.get("video_model", ""),
+                            resolution=resolution or "",
+                            duration=duration,
+                            task_id=task_id,
+                            video_url=result.video_url,
+                            local_path=str(local_path),
+                            prompt_text=final_prompt,
+                            references=[asdict(r) for r in references] or None,
+                            audio_refs=[asdict(a) for a in audio_refs] or None,
+                        )
+                except Exception:
+                    pass  # artifact tree write must not break the main flow
             else:
                 video["status"] = "failed"
                 video["error"] = result.error or "Unknown error"

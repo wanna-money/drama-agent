@@ -1,3 +1,4 @@
+.idea
 .venv/
 __pycache__/
 *.pyc
@@ -20,3 +21,7 @@ node_modules/
 frontend/dist/
 frontend/node_modules/
 docs/superpowers/
+/data/
+/.run/
+/frontend/data/
+/.codegraph/

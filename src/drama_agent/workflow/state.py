@@ -1,4 +1,4 @@
-from typing import TypedDict, Any
+from typing import TypedDict
 
 
 class CharacterProfile(TypedDict):
@@ -12,8 +12,8 @@ class ShotDict(TypedDict):
     shot_id: str
     scene_number: int
     shot_number: int
-    shot_type: str           # ELS/LS/MS/CU/ECU
-    camera_movement: str     # static/pan/tilt/dolly/zoom
+    shot_type: str           # ShotType enum value (workflow/constants.py)
+    camera_movement: str     # CameraMovement enum value (workflow/constants.py)
     duration_seconds: int
     description: str
     characters: list[str]
@@ -27,9 +27,11 @@ class PromptDict(TypedDict):
     prompt_text: str
     negative_prompt: str
     reference_image_url: str | None
-    reference_role: str | None        # "first_frame" | "subject_reference"
+    reference_role: str | None        # ReferenceRole enum value (workflow/constants.py)
     approved: bool
     edited_prompt: str | None
+    edited_negative_prompt: str | None
+    keyframe_url: str | None
 
 
 class VideoDict(TypedDict):
@@ -54,7 +56,9 @@ class StoryAnalysis(TypedDict):
 
 
 class DramaState(TypedDict):
-    project_id: str
+    project_id: str          # 归属项目(角色跨集共享、存储顶层目录用)
+    episode_id: str          # 本集 = LangGraph thread 身份
+    episode_number: int
     title: str
     raw_input: str
     genre: str
@@ -71,12 +75,20 @@ class DramaState(TypedDict):
     prompts_approved: bool
     prompt_revision_notes: str
 
+    use_keyframes: bool
+    keyframe_image_model: str
+    keyframes_approved: bool
+
     videos: list[VideoDict]
     character_references: dict[str, str]   # name -> image_url
+
+    look_assignments: dict[str, dict[str, str]]
+    look_assignments_approved: bool
 
     current_stage: str
     error: str | None
     llm_model: str
     video_model: str
     video_provider: str
+    resolution: str
     assembled_video_path: str | None

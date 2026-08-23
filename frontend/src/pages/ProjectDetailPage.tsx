@@ -1,20 +1,16 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Steps, Button, Tag, Spin, Toast, TextArea, Table, Progress, Modal, Typography, Upload, Input } from '@douyinfe/semi-ui'
+import { Steps, Button, Tag, Spin, Toast, TextArea, Table, Modal, Typography, Upload, Input, Card, Space, Descriptions, List, Banner, Empty, Divider, Select, Checkbox, VideoPlayer as SemiVideoPlayer } from '@douyinfe/semi-ui'
 import type { FileItem } from '@douyinfe/semi-ui/lib/es/upload'
-import { IconUpload, IconDownload, IconPlay, IconPause, IconPlus, IconClose, IconUser, IconHome } from '@douyinfe/semi-icons'
-import { workflowApi, filesApi, projectsApi, createWebSocket, WorkflowStatus, Project } from '../services/api'
+import { IconUpload, IconDownload, IconPlus, IconClose, IconUser, IconHome, IconImage } from '@douyinfe/semi-icons'
+import { workflowApi, filesApi, episodesApi, charactersApi, createWebSocket, WorkflowStatus, Episode, artifactsApi, VideoArtifact, ActionOption, assetsApi, Asset } from '../services/api'
+import ActionParamForm from '../components/ActionParamForm'
+import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
+import PreviewImage from '../components/PreviewImage'
 
-const { Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
-const STAGE_STEP: Record<string, number> = {
-  starting: 0, analyzing: 0, story_analyzed: 0,
-  screenplay_written: 1, screenplay_review: 2, screenplay_approved: 2,
-  screenplay_revision_requested: 1,
-  storyboard_ready: 3, prompts_ready: 4, prompts_review: 4, prompts_approved: 4,
-  prompts_revision_requested: 4,
-  videos_generated: 5, assembly_failed: 5, completed: 6,
-}
+// 流水线步骤由后端下发(status.pipeline,单一真相见后端 pipeline_steps.py);前端只渲染。
 
 const STATUS_LABEL: Record<string, string> = {
   created: '待启动', starting: '启动中', analyzing: '故事分析中', story_analyzed: '分析完成',
@@ -22,8 +18,16 @@ const STATUS_LABEL: Record<string, string> = {
   screenplay_revision_requested: '剧本修改中', storyboard_ready: '分镜完成',
   prompts_ready: 'Prompt生成中', prompts_review: '审核Prompt', prompts_approved: 'Prompt确认',
   prompts_revision_requested: 'Prompt修改中', videos_generated: '视频完成',
+  looks_assigned: '造型指派中', look_review: '审核服装造型', looks_approved: '造型确认',
+  looks_revision_requested: '造型重排中',
+  keyframes_ready: '关键帧生成中', keyframes_review: '审核关键帧', keyframes_approved: '关键帧确认',
+  keyframes_revision_requested: '关键帧重生成中',
   assembly_failed: '合成失败', completed: '制作完成', failed: '失败',
 }
+
+// 金额均为估算,币种人民币;未定价用量存在时不展示可能误导的数字。
+const fmtCost = (n?: number, unpriced?: boolean) =>
+  unpriced ? '未定价' : (n != null ? `¥${n.toFixed(2)}（估算）` : undefined)
 
 // ── Reference entry: one character or location with optional image ──────────
 interface RefEntry {
@@ -42,12 +46,14 @@ function newEntry(key: string, refType: 'character' | 'background', imageUrl = '
 // ── Reference Panel ──────────────────────────────────────────────────────────
 function ReferencesPanel({
   projectId,
+  episodeId,
   entries,
   onChange,
   autoAddType,
   onAutoAddConsumed,
 }: {
   projectId: string
+  episodeId: string
   entries: RefEntry[]
   onChange: (entries: RefEntry[]) => void
   autoAddType?: 'character' | 'background' | null
@@ -55,6 +61,10 @@ function ReferencesPanel({
 }) {
   const [addingType, setAddingType] = useState<'character' | 'background' | null>(null)
   const [newKey, setNewKey] = useState('')
+  const [pickingType, setPickingType] = useState<'character' | 'background' | null>(null)
+  const [libAssets, setLibAssets] = useState<Asset[]>([])
+  const [libLoading, setLibLoading] = useState(false)
+  const [picking, setPicking] = useState(false)
   // Keep a ref to always-latest entries so async handlers don't use stale closures
   const entriesRef = useRef(entries)
   useEffect(() => { entriesRef.current = entries }, [entries])
@@ -80,7 +90,7 @@ function ReferencesPanel({
       update(entry.id, { imageUrl: result.url, localPreview: preview, uploading: false })
       // Use ref to get latest entries at the time upload finishes (avoids stale closure)
       const latest = entriesRef.current
-      await filesApi.updateReferences(projectId, latest.map(e => ({
+      await filesApi.updateReferences(episodeId, latest.map(e => ({
         key: e.key, ref_type: e.refType,
         image_url: e.id === entry.id ? result.url : e.imageUrl,
       })))
@@ -97,209 +107,287 @@ function ReferencesPanel({
     setAddingType(null)
   }
 
+  const openLibrary = (refType: 'character' | 'background') => {
+    setPickingType(refType)
+    setLibLoading(true)
+    assetsApi.list(refType)
+      .then(setLibAssets)
+      .catch(() => Toast.error('素材库加载失败'))
+      .finally(() => setLibLoading(false))
+  }
+
+  // 从库选择:先拷贝一份进本剧集(拿到与 upload 同形状的 url),再走同一条
+  // “新增 entry + updateReferences 持久化” 的既有流程。
+  const handlePickAsset = async (asset: Asset) => {
+    if (!pickingType) return
+    setPicking(true)
+    try {
+      const result = await filesApi.copyFromAsset(projectId, asset.id, pickingType)
+      const entry = newEntry(asset.name, pickingType, result.url)
+      const latest = [...entriesRef.current, entry]
+      onChange(latest)
+      await filesApi.updateReferences(episodeId, latest.map(e => ({
+        key: e.key, ref_type: e.refType, image_url: e.imageUrl,
+      })))
+      Toast.success('已从素材库添加')
+      setPickingType(null)
+    } catch {
+      Toast.error('添加失败')
+    } finally {
+      setPicking(false)
+    }
+  }
+
   const characters = entries.filter(e => e.refType === 'character')
   const backgrounds = entries.filter(e => e.refType === 'background')
 
+  const renderEntry = (entry: RefEntry) => (
+    <List.Item
+      key={entry.id}
+      main={
+        <Space align="center">
+          <Upload
+            action=""
+            accept="image/*"
+            showUploadList={false}
+            beforeUpload={({ file }: { file: FileItem }) => {
+              if (file.fileInstance) handleUpload(entry, file.fileInstance)
+              return { autoRemove: false, status: 'validateFail', shouldUpload: false }
+            }}
+          >
+            {entry.uploading ? (
+              <Spin size="small" />
+            ) : entry.localPreview || entry.imageUrl ? (
+              <PreviewImage src={entry.localPreview || entry.imageUrl} alt={entry.key} width={40} height={40} />
+            ) : (
+              <Button size="small" type="tertiary" icon={<IconUpload />} />
+            )}
+          </Upload>
+          <Text>{entry.key}</Text>
+          {entry.imageUrl
+            ? <Tag color="green">已绑定</Tag>
+            : <Tag color="grey">未上传</Tag>}
+        </Space>
+      }
+      extra={
+        <Space align="center">
+          {entry.imageUrl && (
+            <Button
+              size="small" type="tertiary" theme="borderless"
+              onClick={async () => {
+                update(entry.id, { imageUrl: '', localPreview: '' })
+                const latest = entriesRef.current
+                await filesApi.updateReferences(episodeId, latest.map(e =>
+                  e.id === entry.id ? { key: e.key, ref_type: e.refType, image_url: '' } : { key: e.key, ref_type: e.refType, image_url: e.imageUrl }
+                ))
+              }}
+            >清除图片</Button>
+          )}
+          <Button
+            size="small" type="tertiary" theme="borderless" icon={<IconClose />}
+            onClick={async () => {
+              remove(entry.id)
+              const latest = entriesRef.current.filter(e => e.id !== entry.id)
+              await filesApi.updateReferences(episodeId, latest.map(e => ({
+                key: e.key, ref_type: e.refType, image_url: e.imageUrl
+              })))
+            }}
+          />
+        </Space>
+      }
+    />
+  )
+
   const renderGroup = (group: RefEntry[], label: string, refType: 'character' | 'background') => (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          {refType === 'character' ? <IconUser style={{ color: '#7C3AED', fontSize: 12 }} /> : <IconHome style={{ color: '#3B82F6', fontSize: 12 }} />}
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF' }}>{label}</span>
-        </div>
+    <Space vertical align="start">
+      <Space align="center">
+        {refType === 'character' ? <IconUser /> : <IconHome />}
+        <Text strong>{label}</Text>
         <Button
           size="small" type="tertiary" icon={<IconPlus />}
           onClick={() => { setAddingType(refType); setNewKey('') }}
-          style={{ fontSize: 11, height: 24, padding: '0 8px' }}
         >
           添加
         </Button>
-      </div>
+        <Button
+          size="small" type="tertiary" icon={<IconImage />}
+          onClick={() => openLibrary(refType)}
+        >
+          从库选择
+        </Button>
+      </Space>
 
-      {group.length === 0 && (
-        <div style={{ fontSize: 12, color: '#C4C9D4', padding: '8px 0', fontStyle: 'italic' }}>
-          暂无{label}，点击「添加」新增
-        </div>
-      )}
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {group.map(entry => (
-          <div key={entry.id} className="ref-row">
-            {/* Thumbnail */}
-            <Upload
-              action=""
-              accept="image/*"
-              showUploadList={false}
-              beforeUpload={({ file }: { file: FileItem }) => {
-                if (file.fileInstance) handleUpload(entry, file.fileInstance)
-                return { autoRemove: false, status: 'validateFail', shouldUpload: false }
-              }}
-            >
-              <div className={`ref-thumb-upload ${entry.uploading ? 'uploading' : ''}`}>
-                {entry.localPreview || entry.imageUrl ? (
-                  <img
-                    src={entry.localPreview || entry.imageUrl}
-                    alt={entry.key}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 7 }}
-                  />
-                ) : (
-                  <div className="ref-thumb-empty">
-                    <IconUpload style={{ fontSize: 14, color: entry.uploading ? '#7C3AED' : '#C4C9D4' }} />
-                  </div>
-                )}
-                {entry.uploading && <div className="ref-thumb-overlay"><Spin size="small" /></div>}
-              </div>
-            </Upload>
-
-            {/* Name */}
-            <span className="ref-row-name">{entry.key}</span>
-
-            {/* Status */}
-            {entry.imageUrl ? (
-              <Tag size="small" color="green" style={{ fontSize: 10 }}>已绑定</Tag>
-            ) : (
-              <Tag size="small" color="grey" style={{ fontSize: 10 }}>未上传</Tag>
-            )}
-
-            {/* Clear image */}
-            {entry.imageUrl && (
-              <Button
-                size="small" type="tertiary" theme="borderless"
-                style={{ color: '#9CA3AF', padding: '0 4px', height: 22, fontSize: 11 }}
-                onClick={async () => {
-                  update(entry.id, { imageUrl: '', localPreview: '' })
-                  const latest = entriesRef.current
-                  await filesApi.updateReferences(projectId, latest.map(e =>
-                    e.id === entry.id ? { key: e.key, ref_type: e.refType, image_url: '' } : { key: e.key, ref_type: e.refType, image_url: e.imageUrl }
-                  ))
-                }}
-              >清除图片</Button>
-            )}
-
-            {/* Delete row */}
-            <button
-              className="ref-row-delete"
-              onClick={async () => {
-                remove(entry.id)
-                const latest = entriesRef.current.filter(e => e.id !== entry.id)
-                await filesApi.updateReferences(projectId, latest.map(e => ({
-                  key: e.key, ref_type: e.refType, image_url: e.imageUrl
-                })))
-              }}
-            >
-              <IconClose style={{ fontSize: 11 }} />
-            </button>
-          </div>
-        ))}
-      </div>
+      <List
+        dataSource={group}
+        renderItem={renderEntry}
+        emptyContent={<Text type="tertiary">暂无{label}，点击「添加」新增</Text>}
+      />
 
       {/* Inline add form */}
       {addingType === refType && (
-        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+        <Space align="center">
           <Input
             placeholder={refType === 'character' ? '输入角色名称' : '输入场景地点'}
             value={newKey}
             onChange={setNewKey}
             onEnterPress={handleAddEntry}
             size="small"
-            style={{ flex: 1 }}
             autoFocus
           />
           <Button size="small" type="primary" onClick={handleAddEntry} disabled={!newKey.trim()}>确认</Button>
           <Button size="small" type="tertiary" onClick={() => { setAddingType(null); setNewKey('') }}>取消</Button>
-        </div>
+        </Space>
       )}
-    </div>
+    </Space>
   )
 
   return (
-    <div>
+    <Space vertical align="start" spacing="loose">
       {renderGroup(characters, '角色参考图', 'character')}
-      <div style={{ height: 1, background: 'rgba(255,255,255,0.4)', margin: '4px 0 16px' }} />
+      <Divider />
       {renderGroup(backgrounds, '背景参考图', 'background')}
-    </div>
+
+      <Modal
+        title={pickingType === 'character' ? '从素材库选择人物' : '从素材库选择背景'}
+        visible={!!pickingType}
+        onCancel={() => setPickingType(null)}
+        footer={null}
+        width={640}
+      >
+        {libLoading ? (
+          <Spin />
+        ) : (
+          <List
+            grid={{ gutter: 12, span: 6 }}
+            dataSource={libAssets}
+            emptyContent={<Empty description="素材库暂无该分类素材" />}
+            renderItem={(a: Asset) => (
+              <List.Item>
+                <Card
+                  shadows="hover"
+                  cover={<PreviewImage src={a.url} alt={a.name} width={120} height={120} />}
+                  footer={
+                    <Button
+                      size="small" type="primary" theme="borderless" loading={picking}
+                      onClick={() => handlePickAsset(a)}
+                    >选择</Button>
+                  }
+                >
+                  <Card.Meta title={a.name} description={a.description || undefined} />
+                </Card>
+              </List.Item>
+            )}
+          />
+        )}
+      </Modal>
+    </Space>
   )
 }
 
 // ── Video Player ─────────────────────────────────────────────────────────────
 function VideoPlayer({ src, title }: { src: string; title?: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [playing, setPlaying] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
-
-  const togglePlay = () => {
-    const v = videoRef.current
-    if (!v) return
-    if (v.paused) { v.play(); setPlaying(true) }
-    else { v.pause(); setPlaying(false) }
-  }
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60)
-    return `${m}:${Math.floor(s % 60).toString().padStart(2, '0')}`
-  }
-
-  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
-    const v = videoRef.current
-    if (!v || !duration) return
-    const rect = e.currentTarget.getBoundingClientRect()
-    v.currentTime = ((e.clientX - rect.left) / rect.width) * duration
-  }
-
+  // 播放器用 Semi 原生 VideoPlayer(自带播放/进度/音量/全屏/画中画等控件);
+  // 下载不在其控件栏内,单独保留一个下载按钮。
   return (
-    <div className="video-player-wrap">
-      {title && <div className="video-player-title">{title}</div>}
-      <div className="video-player-screen" onClick={togglePlay}>
-        <video
-          ref={videoRef}
+    <Card title={title}>
+      <Space vertical align="start">
+        <SemiVideoPlayer
           src={src}
-          style={{ width: '100%', display: 'block', borderRadius: '10px 10px 0 0' }}
-          onTimeUpdate={e => {
-            const v = e.currentTarget
-            setCurrentTime(v.currentTime)
-            setProgress(v.duration ? (v.currentTime / v.duration) * 100 : 0)
-          }}
-          onLoadedMetadata={e => setDuration(e.currentTarget.duration)}
-          onEnded={() => setPlaying(false)}
+          height={320}
+          theme="dark"
+          autoPlay={false}
+          muted={false}
+          clickToPlay
+          volume={0.6}
+          defaultPlaybackRate={1}
+          playbackRateList={[
+            { label: '0.5x', value: 0.5 },
+            { label: '1.0x', value: 1 },
+            { label: '1.5x', value: 1.5 },
+            { label: '2.0x', value: 2 },
+          ]}
         />
-        {!playing && (
-          <div className="video-play-overlay">
-            <div className="video-play-btn"><IconPlay size="extra-large" /></div>
-          </div>
+        <Button
+          theme="borderless" type="tertiary" icon={<IconDownload />}
+          onClick={() => {
+            const a = document.createElement('a')
+            a.href = src
+            a.download = title || 'video.mp4'
+            a.click()
+          }}
+        >下载</Button>
+      </Space>
+    </Card>
+  )
+}
+
+// ── Shot Artifact Tree ─────────────────────────────────────────────────────────
+function ShotArtifactPanel({ episodeId, projectId, shotId }: { episodeId: string; projectId: string; shotId: string }) {
+  const [artifacts, setArtifacts] = useState<VideoArtifact[]>([])
+  const [actions, setActions] = useState<ActionOption[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
+  const [activeAction, setActiveAction] = useState<ActionOption | null>(null)
+  const [running, setRunning] = useState(false)
+
+  const load = useCallback(() => {
+    artifactsApi.listByShot(episodeId, shotId).then(setArtifacts).catch(() => setArtifacts([]))
+  }, [episodeId, shotId])
+
+  useEffect(() => { load() }, [load])
+
+  const pick = (aid: string) => {
+    setSelected(aid); setActiveAction(null)
+    artifactsApi.listActions(episodeId, aid).then(setActions).catch(() => setActions([]))
+  }
+
+  const run = (values: Record<string, unknown>) => {
+    if (!selected || !activeAction) return
+    setRunning(true)
+    artifactsApi.runAction(episodeId, selected, activeAction.id, values)
+      .then(() => { Toast.success('已生成新版本'); setActiveAction(null); load() })
+      .catch((e: { response?: { data?: { detail?: string } }; message?: string }) =>
+        Toast.error('执行失败: ' + (e?.response?.data?.detail || e?.message || '')))
+      .finally(() => setRunning(false))
+  }
+
+  if (artifacts.length === 0) return null
+  return (
+    <Card title="版本树">
+      <Space vertical align="start">
+        <Space wrap>
+          {artifacts.map(a => (
+            <Button key={a.id} size="small" theme={selected === a.id ? 'solid' : 'light'} onClick={() => pick(a.id)}>
+              {a.action} · {a.provider} · {a.resolution}
+            </Button>
+          ))}
+        </Space>
+        {selected && actions.length > 0 && (
+          <Space wrap>
+            {actions.map(act => (
+              <Button key={act.id} size="small" type="tertiary" onClick={() => setActiveAction(act)}>{act.label}</Button>
+            ))}
+          </Space>
         )}
-      </div>
-      <div className="video-controls">
-        <button className="video-ctrl-btn" onClick={togglePlay}>
-          {playing ? <IconPause /> : <IconPlay />}
-        </button>
-        <span className="video-time">{formatTime(currentTime)}</span>
-        <div className="video-progress-bar" onClick={handleSeek}>
-          <div className="video-progress-fill" style={{ width: `${progress}%` }} />
-        </div>
-        <span className="video-time">{formatTime(duration)}</span>
-        <button className="video-ctrl-btn" onClick={() => {
-          const a = document.createElement('a')
-          a.href = src
-          a.download = title || 'video.mp4'
-          a.click()
-        }}>
-          <IconDownload />
-        </button>
-      </div>
-    </div>
+        {activeAction && (
+          <ActionParamForm schema={activeAction.param_schema} onSubmit={run} submitting={running} projectId={projectId} />
+        )}
+      </Space>
+    </Card>
   )
 }
 
 // ── Main Page ────────────────────────────────────────────────────────────────
 export default function ProjectDetailPage() {
-  const { id } = useParams<{ id: string }>()
+  const { episodeId } = useParams<{ episodeId: string }>()
   const navigate = useNavigate()
-  const [project, setProject] = useState<Project | null>(null)
+  const [episode, setEpisode] = useState<Episode | null>(null)
   const [status, setStatus] = useState<WorkflowStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [editedPrompts, setEditedPrompts] = useState<Record<string, string>>({})
+  const [editedNegativePrompts, setEditedNegativePrompts] = useState<Record<string, string>>({})
+  const [lookAssignmentsDraft, setLookAssignmentsDraft] = useState<Record<string, Record<string, string>>>({})
+  const [looksCatalog, setLooksCatalog] = useState<Record<string, { id: string; name: string }[]>>({})
+  const [regenSelection, setRegenSelection] = useState<string[]>([])
   const [reviewNotes, setReviewNotes] = useState('')
   const reviewNotesRef = useRef('')
   const setReviewNotesAndRef = (v: string) => { setReviewNotes(v); reviewNotesRef.current = v }
@@ -307,25 +395,30 @@ export default function ProjectDetailPage() {
   const [reviewLoading, setReviewLoading] = useState(false)
   const [refEntries, setRefEntries] = useState<RefEntry[]>([])
   const [pendingAddType, setPendingAddType] = useState<'character' | 'background' | null>(null)
-  const [rawInputExpanded, setRawInputExpanded] = useState(false)
-  const [storyRawExpanded, setStoryRawExpanded] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const lastSeqRef = useRef<number>(0)
   const refEntriesInitialized = useRef(false)
+  const lookDraftSeeded = useRef(false)
   const projectStatusRef = useRef<string>('created')
 
+  const projectId = episode?.project_id
+
   const refreshStatus = useCallback(async () => {
-    if (!id) return
-    const [proj, wfStatus] = await Promise.all([
-      projectsApi.get(id),
-      workflowApi.status(id).catch(() => null),
+    if (!episodeId) return
+    // Workflow status carries project_id, which we need before we can load the episode.
+    const wfStatus = await workflowApi.status(episodeId).catch(() => null)
+    const [ep, serverRefs] = await Promise.all([
+      wfStatus?.project_id
+        ? episodesApi.get(wfStatus.project_id, episodeId).catch(() => null)
+        : Promise.resolve(null),
+      filesApi.getReferences(episodeId).catch(() => ({} as Record<string, string>)),
     ])
-    setProject(proj)
-    if (proj) projectStatusRef.current = proj.status
+    if (ep) setEpisode(ep)
+    projectStatusRef.current = ep?.status ?? 'created'
     if (wfStatus) {
       setStatus(wfStatus)
       // Re-sync ref entries whenever story_analysis or shots bring new data
       if (!refEntriesInitialized.current) {
-        const serverRefs = wfStatus.character_references || {}
         const chars = wfStatus.story_analysis?.characters?.map((c: { name: string }) => c.name) || []
         const locations = [...new Set((wfStatus.shots || []).map((s: { location: string }) => s.location).filter(Boolean))] as string[]
 
@@ -366,42 +459,67 @@ export default function ProjectDetailPage() {
         }
       }
     }
-  }, [id])
+  }, [episodeId])
 
   useEffect(() => {
-    if (!id) return
+    if (!episodeId) return
     refreshStatus().finally(() => setLoading(false))
-    const ws = createWebSocket(id, (event) => {
+    const ws = createWebSocket(episodeId, (event) => {
+      if (typeof event.seq === 'number') lastSeqRef.current = Math.max(lastSeqRef.current, event.seq)
       if (event.type === 'stage_change') {
-        const stage: string = event.data?.stage || ''
+        const stage: string = event.data?.payload_json?.current_stage || ''
         if (stage === 'story_analyzed' || stage === 'storyboard_ready') {
           refEntriesInitialized.current = false
         }
         refreshStatus()
       }
-      if (event.type === 'error') Toast.error('工作流错误: ' + event.data?.message)
-    })
+      if (event.type === 'error') Toast.error('工作流错误: ' + (event.data?.payload_json?.message || ''))
+    }, lastSeqRef.current)
     wsRef.current = ws
     ws.onclose = (e) => {
-      const INACTIVE = ['created', 'completed', 'failed', 'assembly_failed']
+      const INACTIVE = ['created', 'completed', 'failed']
       if (!e.wasClean && !INACTIVE.includes(projectStatusRef.current)) {
         Toast.warning({ content: '实时连接已断开，请刷新页面获取最新状态', duration: 0 })
       }
     }
     return () => { ws.onclose = null; ws.close() }
-  }, [id, refreshStatus])
+  }, [episodeId, refreshStatus])
+
+  // 进入 look_review 时:用 status 的指派作草稿初值,并拉角色 Looks 供下拉选择。
+  // 只在「刚进入」时播种,避免后续 status 刷新覆盖用户正在编辑的选择。
+  useEffect(() => {
+    if (status?.paused_at !== 'look_review') {
+      lookDraftSeeded.current = false
+      return
+    }
+    if (lookDraftSeeded.current) return
+    lookDraftSeeded.current = true
+    setLookAssignmentsDraft(status.look_assignments || {})
+    if (!projectId) return
+    let cancelled = false
+    charactersApi.list(projectId)
+      .then(async chars => {
+        const pairs = await Promise.all(chars.map(async c => {
+          const looks = await charactersApi.listLooks(projectId, c.id).catch(() => [])
+          return [c.name, looks.map(lk => ({ id: lk.id, name: lk.name }))] as const
+        }))
+        if (!cancelled) setLooksCatalog(Object.fromEntries(pairs))
+      })
+      .catch(() => { if (!cancelled) setLooksCatalog({}) })
+    return () => { cancelled = true }
+  }, [status?.paused_at, status?.look_assignments, projectId])
 
   const handleStart = async () => {
-    if (!id || starting) return
+    if (!episodeId || starting) return
     setStarting(true)
     try {
       // Persist any pre-set references before starting
       if (refEntries.some(e => e.imageUrl)) {
-        await filesApi.updateReferences(id, refEntries.map(e => ({
+        await filesApi.updateReferences(episodeId, refEntries.map(e => ({
           key: e.key, ref_type: e.refType, image_url: e.imageUrl
         })))
       }
-      await workflowApi.start(id)
+      await workflowApi.start(episodeId)
       Toast.info('制作流程已启动')
       await refreshStatus()
     } catch (e: unknown) {
@@ -413,10 +531,10 @@ export default function ProjectDetailPage() {
   }
 
   const handleApproveScreenplay = async (approved: boolean) => {
-    if (!id || reviewLoading) return
+    if (!episodeId || reviewLoading) return
     setReviewLoading(true)
     try {
-      await workflowApi.resume(id, { approved, notes: reviewNotesRef.current })
+      await workflowApi.resume(episodeId, { approved, notes: reviewNotesRef.current })
       setReviewNotesAndRef('')
       Toast.success(approved ? '剧本已通过' : '已提交修改意见')
       await refreshStatus()
@@ -429,11 +547,14 @@ export default function ProjectDetailPage() {
   }
 
   const handleApprovePrompts = async (approved: boolean) => {
-    if (!id || reviewLoading) return
+    if (!episodeId || reviewLoading) return
     setReviewLoading(true)
     try {
-      await workflowApi.resume(id, { approved, notes: reviewNotes, edited_prompts: editedPrompts })
-      setReviewNotes('')
+      await workflowApi.resume(episodeId, {
+        approved, notes: reviewNotesRef.current,
+        edited_prompts: editedPrompts, edited_negative_prompts: editedNegativePrompts,
+      })
+      setReviewNotesAndRef('')
       Toast.success(approved ? '确认完成，开始生成视频' : '已提交修改意见')
       await refreshStatus()
     } catch (e: unknown) {
@@ -444,223 +565,214 @@ export default function ProjectDetailPage() {
     }
   }
 
-  if (loading) return (
-    <div style={{ textAlign: 'center', marginTop: 120 }}>
-      <Spin size="large" />
-      <div style={{ color: '#9CA3AF', marginTop: 16, fontSize: 12, letterSpacing: '0.5px' }}>载入中...</div>
-    </div>
-  )
+  const handleApproveLooks = async (approved: boolean) => {    if (!episodeId || reviewLoading) return
+    setReviewLoading(true)
+    try {
+      await workflowApi.resume(episodeId, { approved, assignments: lookAssignmentsDraft })
+      Toast.success(approved ? '造型已确认' : '已退回重排')
+      await refreshStatus()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      Toast.error('操作失败: ' + (err?.response?.data?.detail || err?.message || '未知错误'))
+    } finally {
+      setReviewLoading(false)
+    }
+  }
 
-  if (!project) return (
-    <div style={{ textAlign: 'center', marginTop: 120, color: '#9CA3AF' }}>
-      <div style={{ marginBottom: 16 }}>项目未找到</div>
+  const handleApproveKeyframes = async (approved: boolean) => {
+    if (!episodeId || reviewLoading) return
+    setReviewLoading(true)
+    try {
+      await workflowApi.resume(episodeId, { approved, regenerate_shot_ids: regenSelection })
+      if (!approved) setRegenSelection([])
+      Toast.success(approved ? '关键帧已确认，开始生成视频' : '已提交重生成')
+      await refreshStatus()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      Toast.error('操作失败: ' + (err?.response?.data?.detail || err?.message || '未知错误'))
+    } finally {
+      setReviewLoading(false)
+    }
+  }
+
+  if (loading) return <PageLoading />
+
+  if (!episode) return (
+    <PageEmpty variant="error" title="项目未找到">
       <Button type="tertiary" onClick={() => navigate('/')}>返回列表</Button>
-    </div>
+    </PageEmpty>
   )
 
-  const stage = status?.current_stage || project.status
-  const nextNodes = status?.next || []
-  const effectiveStage = nextNodes.includes('screenplay_review') ? 'screenplay_review'
-    : nextNodes.includes('prompts_review') ? 'prompts_review'
-    : stage
-  const stepIndex = STAGE_STEP[effectiveStage] ?? 0
-  const isAtScreenplayReview = stage === 'screenplay_review' || nextNodes.includes('screenplay_review')
-  const isAtPromptsReview = stage === 'prompts_review' || nextNodes.includes('prompts_review')
+  const stage = status?.current_stage || episode.status
+  const isPaused = status?.db_status === 'paused'
+  const pausedAt = status?.paused_at || null
+  const pipeline = status?.pipeline
+  const steps = pipeline?.steps ?? []
+  const stepIndex = Math.max(0, steps.findIndex(s => s.key === pipeline?.current))
+  const isAtScreenplayReview = isPaused && pausedAt === 'screenplay_review'
+  const isAtPromptsReview = isPaused && pausedAt === 'prompts_review'
+  const isAtLookReview = isPaused && pausedAt === 'look_review'
+  const isAtKeyframesReview = isPaused && pausedAt === 'keyframes_review'
   const PAUSED_OR_TERMINAL = ['created', 'completed', 'failed', 'assembly_failed']
-  const isRunning = !PAUSED_OR_TERMINAL.includes(stage) && !isAtScreenplayReview && !isAtPromptsReview
-
-  const sectionHeader = (title: string, extra?: React.ReactNode) => (
-    <div className="glass-card-header">
-      <span className="glass-card-title">{title}</span>
-      {extra}
-    </div>
-  )
+  const isRunning = !PAUSED_OR_TERMINAL.includes(stage)
+    && !isAtScreenplayReview && !isAtPromptsReview && !isAtLookReview && !isAtKeyframesReview
+  const stepStatus = (i: number): 'process' | 'finish' | 'error' | 'warning' | undefined => {
+    if (pipeline?.current == null) return undefined
+    if (i < stepIndex) return 'finish'
+    if (i > stepIndex) return undefined
+    if (episode.status === 'failed' || stage === 'assembly_failed') return 'error'
+    if (isAtScreenplayReview || isAtPromptsReview || isAtLookReview || isAtKeyframesReview) return 'warning'
+    if (!isRunning) return 'finish'
+    return 'process'
+  }
 
   return (
-    <div>
-      {/* Project header */}
-      <div style={{ marginBottom: 28 }}>
-        <button
-          onClick={() => navigate('/')}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9CA3AF', fontSize: 12, padding: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: 4 }}
-        >
-          ← 返回列表
-        </button>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: '#111827', letterSpacing: '-0.4px', margin: 0 }}>
-            {project.title}
-          </h1>
-          <Tag>{project.genre}</Tag>
-          <Tag color="blue">{{ seedance: 'Seedance 2.0', bailian: '万相 2.7' }[project.video_provider] ?? project.video_provider}</Tag>
-          {isRunning && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', fontSize: 12, color: '#7C3AED', fontWeight: 500 }}>
-              <span className="status-dot" />
-              {STATUS_LABEL[stage] || stage}
-            </span>
+    <PageShell
+      breadcrumb={[
+        { label: '作品列表', href: '/' },
+        { label: '作品', href: projectId ? `/projects/${projectId}` : undefined },
+        { label: episode.title },
+      ]}
+      title={
+        <Space wrap align="center">
+          <Title heading={3}>{episode.title}</Title>
+          <Tag>第 {episode.episode_number} 集</Tag>
+          <Tag color="blue">{{ seedance: 'Seedance 2.0', minimax: 'MiniMax H3' }[episode.video_provider] ?? episode.video_provider}</Tag>
+          {episode.script_id && (
+            <Text link onClick={() => navigate(`/scripts/${episode.script_id}`)}>源剧本 →</Text>
           )}
+          {isRunning && <Tag color="blue">{STATUS_LABEL[stage] || stage}</Tag>}
           {!isRunning && stage !== 'created' && (
-            <span style={{ fontSize: 12, color: '#9CA3AF' }}>{STATUS_LABEL[stage] || stage}</span>
+            <Text type="tertiary">{STATUS_LABEL[stage] || stage}</Text>
           )}
-        </div>
-      </div>
-
+        </Space>
+      }
+    >
+      <Space vertical align="start" spacing="loose">
       {/* Progress steps */}
-      <div className="glass-card" style={{ padding: '20px 28px', marginBottom: 20 }}>
-        <Steps current={stepIndex}>
-          <Steps.Step title="故事分析" description="提取角色情节" />
-          <Steps.Step title="生成剧本" description="专业格式" />
-          <Steps.Step title="审核剧本" description="人工确认" />
-          <Steps.Step title="分镜" description="拆分镜头" />
-          <Steps.Step title="Prompt" description="视频提示词" />
-          <Steps.Step title="生成视频" description="AI 合成" />
-          <Steps.Step title="完成" description="最终成片" />
-        </Steps>
-      </div>
+      {steps.length > 0 && (
+        <Card>
+          <Steps current={stepIndex}>
+            {steps.map((s, i) => (
+              <Steps.Step
+                key={s.key}
+                title={s.label}
+                description={fmtCost(s.cost, status?.cost_unpriced)}
+                status={stepStatus(i)}
+              />
+            ))}
+          </Steps>
+        </Card>
+      )}
 
       {/* Start CTA (created state) */}
-      {project.status === 'created' && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          <div style={{ padding: '32px 32px 24px' }}>
-            <div style={{ textAlign: 'center', marginBottom: 28 }}>
-              <div className="start-cta-title">项目准备就绪</div>
-              <div className="start-cta-desc">
-                AI 将自动完成故事分析、剧本创作、分镜规划、Prompt 生成和视频合成<br />
-                您可提前上传角色/背景参考图，也可在流程启动后随时补充
-              </div>
-            </div>
+      {episode.status === 'created' && (
+        <Card title="项目准备就绪">
+          <Space vertical align="start" spacing="loose">
+            <Paragraph type="tertiary">
+              AI 将自动完成故事分析、剧本创作、分镜规划、Prompt 生成和视频合成。
+              您可提前上传角色/背景参考图，也可在流程启动后随时补充。
+            </Paragraph>
 
-            {/* Raw input preview */}
-            {project.raw_input && (
-              <div className="glass-inset" style={{ marginBottom: 16 }}>
-                <div
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', cursor: 'pointer', userSelect: 'none' }}
-                  onClick={() => setRawInputExpanded(v => !v)}
-                >
-                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF' }}>故事内容</span>
-                  <span style={{ fontSize: 11, color: '#9CA3AF' }}>{rawInputExpanded ? '收起 ▲' : '展开 ▼'}</span>
-                </div>
-                {rawInputExpanded && (
-                  <div style={{ padding: '0 20px 16px', fontSize: 13, color: '#4B5563', lineHeight: 1.8, whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto' }}>
-                    {project.raw_input}
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="glass-inset" style={{ marginBottom: 24 }}>
-              {sectionHeader('参考图片（选填）', (
-                <span style={{ fontSize: 11, color: '#9CA3AF' }}>启动后亦可修改</span>
-              ))}
-              <div style={{ padding: '16px 20px' }}>
-                <ReferencesPanel
-                    projectId={id!}
-                    entries={refEntries}
-                    onChange={setRefEntries}
-                    autoAddType={pendingAddType}
-                    onAutoAddConsumed={() => setPendingAddType(null)}
-                  />
-              </div>
-            </div>
+            <Card title="参考图片（选填）" headerExtraContent={<Text type="tertiary">启动后亦可修改</Text>}>
+              <ReferencesPanel
+                projectId={projectId ?? ''}
+                episodeId={episodeId!}
+                entries={refEntries}
+                onChange={setRefEntries}
+                autoAddType={pendingAddType}
+                onAutoAddConsumed={() => setPendingAddType(null)}
+              />
+            </Card>
 
-            <div style={{ textAlign: 'center' }}>
-              <Button type="primary" size="large" loading={starting} onClick={handleStart} style={{ minWidth: 160 }}>
-                开始制作
-              </Button>
-            </div>
-          </div>
-        </div>
+            <Button colorful theme="solid" type="primary" loading={starting} onClick={handleStart}>
+              开始制作
+            </Button>
+          </Space>
+        </Card>
       )}
 
       {/* Reference images panel (after start) */}
-      {project.status !== 'created' && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader('参考图片')}
-          <div style={{ padding: '16px 20px' }}>
-            <ReferencesPanel
-              projectId={id!}
-              entries={refEntries}
-              onChange={setRefEntries}
-            />
-          </div>
-        </div>
+      {episode.status !== 'created' && (
+        <Card title="参考图片">
+          <ReferencesPanel
+            projectId={projectId ?? ''}
+            episodeId={episodeId!}
+            entries={refEntries}
+            onChange={setRefEntries}
+          />
+        </Card>
       )}
 
       {/* Story Analysis */}
       {status?.story_analysis && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader('故事分析', project.raw_input && (
-            <button
-              onClick={() => setStoryRawExpanded(v => !v)}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11, color: '#9CA3AF', padding: '2px 8px' }}
-            >
-              {storyRawExpanded ? '收起原文 ▲' : '查看原文 ▼'}
-            </button>
-          ))}
-          {storyRawExpanded && project.raw_input && (
-            <div style={{ margin: '0 20px', padding: '14px 16px', background: 'rgba(0,0,0,0.03)', borderRadius: 8, borderLeft: '3px solid rgba(124,58,237,0.2)', marginBottom: 4 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF', marginBottom: 8 }}>原始故事</div>
-              <div style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.8, whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto' }}>
-                {project.raw_input}
-              </div>
-            </div>
-          )}
-          <div className="glass-card-body">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 20, marginBottom: 20 }}>
-              {[
-                { k: '类型', v: status.story_analysis.genre },
-                { k: '基调', v: status.story_analysis.tone },
-                { k: '主题', v: status.story_analysis.themes?.join('、') },
-              ].map(({ k, v }) => (
-                <div key={k}>
-                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF', marginBottom: 5 }}>{k}</div>
-                  <div style={{ color: '#374151', fontSize: 13 }}>{v || '-'}</div>
-                </div>
-              ))}
-            </div>
+        <Card title="故事分析">
+          <Space vertical align="start" spacing="loose">
+            <Descriptions
+              data={[
+                { key: '类型', value: status.story_analysis.genre || '-' },
+                { key: '基调', value: status.story_analysis.tone || '-' },
+                { key: '主题', value: status.story_analysis.themes?.join('、') || '-' },
+              ]}
+            />
+
             {status.story_analysis.plot_summary && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF', marginBottom: 8 }}>故事梗概</div>
-                <div style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.75, paddingLeft: 12, borderLeft: '3px solid rgba(124,58,237,0.25)', borderRadius: '0 4px 4px 0' }}>
-                  {status.story_analysis.plot_summary}
-                </div>
-              </div>
+              <Space vertical align="start">
+                <Text type="tertiary" strong>故事梗概</Text>
+                <Paragraph type="tertiary">{status.story_analysis.plot_summary}</Paragraph>
+              </Space>
             )}
+
             {status.story_analysis.characters?.length > 0 && (
-              <div>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: '#9CA3AF', marginBottom: 12 }}>角色</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: 10 }}>
+              <Space vertical align="start">
+                <Text type="tertiary" strong>角色</Text>
+                <Space wrap align="start">
                   {status.story_analysis.characters.map((c: { name: string; appearance?: string; personality?: string }) => {
                     const refEntry = refEntries.find(e => e.key === c.name && e.refType === 'character')
                     return (
-                      <div key={c.name} className="character-card">
-                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                      <Card key={c.name} title={c.name}>
+                        <Space align="start">
                           {refEntry?.imageUrl && (
-                            <img src={refEntry.localPreview || refEntry.imageUrl} alt={c.name}
-                              style={{ width: 44, height: 44, borderRadius: 6, objectFit: 'cover', flexShrink: 0, border: '1px solid rgba(255,255,255,0.7)' }} />
+                            <PreviewImage src={refEntry.localPreview || refEntry.imageUrl} alt={c.name} width={44} height={44} />
                           )}
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="character-name">{c.name}</div>
-                            {c.appearance && <div style={{ color: '#9CA3AF', fontSize: 11, marginBottom: 2 }}>外貌：{c.appearance}</div>}
-                            {c.personality && <div style={{ color: '#9CA3AF', fontSize: 11 }}>性格：{c.personality}</div>}
-                          </div>
-                        </div>
-                      </div>
+                          <Space vertical align="start">
+                            {c.appearance && <Text type="tertiary">外貌：{c.appearance}</Text>}
+                            {c.personality && <Text type="tertiary">性格：{c.personality}</Text>}
+                          </Space>
+                        </Space>
+                      </Card>
                     )
                   })}
-                </div>
-              </div>
+                </Space>
+              </Space>
             )}
-          </div>
-        </div>
+          </Space>
+        </Card>
+      )}
+
+      {/* Cost breakdown */}
+      {status?.cost_total != null && (
+        <Card title="成本（估算）">
+          <Descriptions
+            data={[
+              { key: 'LLM', value: fmtCost(status.cost_by_kind?.llm, status.cost_unpriced) ?? '—' },
+              { key: '图像', value: fmtCost(status.cost_by_kind?.image, status.cost_unpriced) ?? '—' },
+              { key: '视频', value: fmtCost(status.cost_by_kind?.video, status.cost_unpriced) ?? '—' },
+              { key: '合计', value: fmtCost(status.cost_total, status.cost_unpriced) ?? '—' },
+              { key: 'Token 总数', value: String(status.cost_tokens_total ?? 0) },
+            ]}
+          />
+        </Card>
       )}
 
       {/* Screenplay */}
       {status?.screenplay && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader('剧本', isAtScreenplayReview && (
-            <div style={{ display: 'flex', gap: 8 }}>
+        <Card
+          title="剧本"
+          headerExtraContent={isAtScreenplayReview && (
+            <Space>
               <Button type="primary" size="small" loading={reviewLoading} onClick={() => handleApproveScreenplay(true)}>通过</Button>
-              <Button size="small" loading={reviewLoading}
-                style={{ background: 'rgba(217,119,6,0.08)', borderColor: 'rgba(217,119,6,0.25)', color: '#D97706', borderRadius: '100px' }}
+              <Button type="warning" size="small" loading={reviewLoading}
                 onClick={() => {
                   setReviewNotesAndRef('')
                   Modal.confirm({
@@ -671,129 +783,273 @@ export default function ProjectDetailPage() {
                   })
                 }}
               >修改</Button>
-            </div>
-          ))}
-          <div className="glass-card-body">
-            {isAtScreenplayReview && <div className="review-bar">等待您审核剧本，确认内容后点击「通过」，或提交修改意见</div>}
-            <pre className="screenplay-block">{status.screenplay}</pre>
-          </div>
-        </div>
+            </Space>
+          )}
+        >
+          <Space vertical align="start">
+            {isAtScreenplayReview && (
+              <Banner
+                type="info"
+                fullMode={false}
+                closeIcon={null}
+                description="等待您审核剧本，确认内容后点击「通过」，或提交修改意见"
+              />
+            )}
+            <pre>{status.screenplay}</pre>
+          </Space>
+        </Card>
       )}
 
       {/* Storyboard */}
       {status?.shots && status.shots.length > 0 && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader(`分镜脚本 · ${status.shots.length} 个镜头`)}
-          <div style={{ padding: '0 20px 16px' }}>
-            <Table size="small" dataSource={status.shots} rowKey="shot_id" pagination={false} style={{ marginTop: 8 }}
-              columns={[
-                { title: '场景', dataIndex: 'scene_number', width: 60 },
-                { title: '镜头', dataIndex: 'shot_number', width: 60 },
-                { title: '景别', dataIndex: 'shot_type', width: 80 },
-                { title: '运镜', dataIndex: 'camera_movement', width: 80 },
-                { title: '时长', dataIndex: 'duration_seconds', width: 60, render: (v: number) => `${v}s` },
-                { title: '描述', dataIndex: 'description' },
-                { title: '人物', dataIndex: 'characters', render: (v: string[]) => v?.join(', ') || '-' },
-              ]}
+        <Card title={`分镜脚本 · ${status.shots.length} 个镜头`}>
+          <Table size="small" dataSource={status.shots} rowKey="shot_id" pagination={false}
+            expandRowByClick
+            expandedRowRender={(row: any) => (
+              <Space vertical align="start">
+                <Space>
+                  <Text type="tertiary" strong>地点：</Text>
+                  <Text type="tertiary">{row.location || '（未指定）'}</Text>
+                </Space>
+                <Space>
+                  <Text type="tertiary" strong>动作：</Text>
+                  <Text type="tertiary">{row.action || '（无动作描述）'}</Text>
+                </Space>
+                <Space>
+                  <Text type="tertiary" strong>台词：</Text>
+                  <Text type="tertiary">{row.dialogue || '（无台词）'}</Text>
+                </Space>
+              </Space>
+            )}
+            columns={[
+              { title: '场景', dataIndex: 'scene_number', width: 60 },
+              { title: '镜头', dataIndex: 'shot_number', width: 60 },
+              { title: '景别', dataIndex: 'shot_type', width: 80 },
+              { title: '运镜', dataIndex: 'camera_movement', width: 80 },
+              { title: '时长', dataIndex: 'duration_seconds', width: 60, render: (v: number) => `${v}s` },
+              { title: '描述', dataIndex: 'description' },
+              { title: '人物', dataIndex: 'characters', render: (v: string[]) => v?.join(', ') || '-' },
+            ]}
+          />
+        </Card>
+      )}
+
+      {/* Look assignment review */}
+      {isAtLookReview && (
+        <Card title="审核服装造型（场景 → 角色 → 造型）">
+          <Space vertical align="start" spacing="medium">
+            <Banner
+              type="info"
+              fullMode={false}
+              closeIcon={null}
+              description="确认每个场景中各角色所穿的造型，可调整后确认，或退回重新指派"
             />
-          </div>
-        </div>
+            {Object.entries(lookAssignmentsDraft).map(([scene, byName]) => (
+              <Space vertical align="start" key={scene}>
+                <Text strong>{`场景 ${scene}`}</Text>
+                {Object.entries(byName).map(([name, lookId]) => (
+                  <Space key={name} align="center">
+                    <Text>{name}</Text>
+                    <Select
+                      value={lookId}
+                      onChange={v => setLookAssignmentsDraft(prev => ({
+                        ...prev, [scene]: { ...prev[scene], [name]: v as string },
+                      }))}
+                    >
+                      {(looksCatalog[name] || []).map(lk => (
+                        <Select.Option key={lk.id} value={lk.id}>{lk.name}</Select.Option>
+                      ))}
+                    </Select>
+                  </Space>
+                ))}
+              </Space>
+            ))}
+            <Space>
+              <Button type="primary" theme="solid" loading={reviewLoading}
+                onClick={() => handleApproveLooks(true)}>确认造型</Button>
+              <Button loading={reviewLoading} onClick={() => handleApproveLooks(false)}>退回重排</Button>
+            </Space>
+          </Space>
+        </Card>
       )}
 
       {/* Prompts */}
       {status?.prompts && status.prompts.length > 0 && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader(`视频 Prompt · ${status.prompts.length} 个`, isAtPromptsReview && (
-            <Button type="primary" size="small" loading={reviewLoading} onClick={() => handleApprovePrompts(true)}>
-              全部确认，开始生成视频
-            </Button>
-          ))}
-          <div className="glass-card-body">
-            {isAtPromptsReview && <div className="review-bar">请检查并编辑各镜头的 Prompt，确认无误后点击「全部确认」</div>}
-            {status.prompts.map((p: { shot_id: string; prompt_text: string; edited_prompt?: string; negative_prompt?: string }) => {
-              const shot = status.shots?.find((s: { shot_id: string; scene_number?: number; shot_number?: number; shot_type?: string; duration_seconds?: number }) => s.shot_id === p.shot_id)
-              return (
-                <div key={p.shot_id} className="prompt-item">
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                    {shot && <><Tag>场景{shot.scene_number}-镜头{shot.shot_number}</Tag><Tag color="blue">{shot.shot_type}</Tag><Tag>{shot.duration_seconds}s</Tag></>}
-                  </div>
-                  {isAtPromptsReview ? (
-                    <TextArea value={editedPrompts[p.shot_id] ?? p.prompt_text} onChange={v => setEditedPrompts(prev => ({ ...prev, [p.shot_id]: v }))} rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} />
-                  ) : (
-                    <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#4B5563', lineHeight: 1.6 }}>{p.edited_prompt || p.prompt_text}</div>
-                  )}
-                  {p.negative_prompt && <div style={{ marginTop: 5, color: '#9CA3AF', fontSize: 11 }}>负向：{p.negative_prompt}</div>}
-                </div>
-              )
-            })}
-          </div>
-        </div>
+        <Card
+          title={`视频 Prompt · ${status.prompts.length} 个`}
+          headerExtraContent={isAtPromptsReview && (
+            <Space>
+              <Button type="primary" size="small" loading={reviewLoading} onClick={() => handleApprovePrompts(true)}>
+                全部确认，开始生成视频
+              </Button>
+              <Button type="warning" size="small" loading={reviewLoading}
+                onClick={() => {
+                  setReviewNotesAndRef('')
+                  Modal.confirm({
+                    title: '提交修改意见',
+                    content: <TextArea placeholder="请描述 Prompt 需要调整的地方..." rows={4} onChange={v => setReviewNotesAndRef(v)} />,
+                    onOk: () => handleApprovePrompts(false),
+                    onCancel: () => setReviewNotesAndRef(''),
+                  })
+                }}
+              >退回重新生成</Button>
+            </Space>
+          )}
+        >
+          <Space vertical align="start">
+            {isAtPromptsReview && (
+              <Banner
+                type="info"
+                fullMode={false}
+                closeIcon={null}
+                description="请检查并编辑各镜头的 Prompt，确认无误后点击「全部确认」"
+              />
+            )}
+            <List
+              dataSource={status.prompts}
+              renderItem={(p: { shot_id: string; prompt_text: string; edited_prompt?: string; negative_prompt?: string; edited_negative_prompt?: string }) => {
+                const shot = status.shots?.find((s: { shot_id: string; scene_number?: number; shot_number?: number; shot_type?: string; duration_seconds?: number }) => s.shot_id === p.shot_id)
+                // 空串是"用户主动清空"的有效值,不能用 || 回落到原始值
+                const displayNegative = p.edited_negative_prompt ?? p.negative_prompt
+                return (
+                  <List.Item key={p.shot_id}>
+                    <Space vertical align="start">
+                      <Space wrap>
+                        {shot && <><Tag>场景{shot.scene_number}-镜头{shot.shot_number}</Tag><Tag color="blue">{shot.shot_type}</Tag><Tag>{shot.duration_seconds}s</Tag></>}
+                      </Space>
+                      {isAtPromptsReview ? (
+                        <TextArea value={editedPrompts[p.shot_id] ?? p.prompt_text} onChange={v => setEditedPrompts(prev => ({ ...prev, [p.shot_id]: v }))} rows={3} />
+                      ) : (
+                        <Text type="tertiary">{p.edited_prompt || p.prompt_text}</Text>
+                      )}
+                      {isAtPromptsReview ? (
+                        <TextArea
+                          value={editedNegativePrompts[p.shot_id] ?? p.negative_prompt ?? ''}
+                          onChange={v => setEditedNegativePrompts(prev => ({ ...prev, [p.shot_id]: v }))}
+                          rows={2}
+                        />
+                      ) : (
+                        displayNegative ? <Text type="tertiary">负向：{displayNegative}</Text> : null
+                      )}
+                    </Space>
+                  </List.Item>
+                )
+              }}
+            />
+          </Space>
+        </Card>
+      )}
+
+      {/* Keyframes review */}
+      {isAtKeyframesReview && (
+        <Card title="审核关键帧（勾选要重生成的镜头）">
+          <Space vertical align="start" spacing="medium">
+            <Banner
+              type="info"
+              fullMode={false}
+              closeIcon={null}
+              description="确认各镜头关键帧，满意则开始生成视频；不满意可勾选后提交重生成"
+            />
+            <List
+              dataSource={status?.prompts || []}
+              renderItem={(p: { shot_id: string; prompt_text: string; keyframe_url?: string | null }) => {
+                const shot = status?.shots?.find((s: { shot_id: string; scene_number?: number; shot_number?: number }) => s.shot_id === p.shot_id)
+                return (
+                  <List.Item
+                    key={p.shot_id}
+                    header={p.keyframe_url
+                      ? <PreviewImage src={p.keyframe_url} alt={p.shot_id} width={96} height={54} />
+                      : <Text type="tertiary">无关键帧</Text>}
+                    main={
+                      <Space vertical align="start">
+                        {shot && <Tag>场景{shot.scene_number}-镜头{shot.shot_number}</Tag>}
+                        <Text type="tertiary">{p.prompt_text}</Text>
+                      </Space>
+                    }
+                    extra={
+                      <Checkbox
+                        checked={regenSelection.includes(p.shot_id)}
+                        onChange={e => setRegenSelection(prev => e.target.checked
+                          ? [...prev, p.shot_id]
+                          : prev.filter(x => x !== p.shot_id))}
+                      >重生成</Checkbox>
+                    }
+                  />
+                )
+              }}
+            />
+            <Space>
+              <Button type="primary" theme="solid" loading={reviewLoading}
+                onClick={() => handleApproveKeyframes(true)}>确认，生成视频</Button>
+              <Button loading={reviewLoading} disabled={!regenSelection.length}
+                onClick={() => handleApproveKeyframes(false)}>重生成所选</Button>
+            </Space>
+          </Space>
+        </Card>
       )}
 
       {/* Videos */}
       {status?.videos && status.videos.length > 0 && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader('视频生成进度')}
-          <div className="glass-card-body">
-            {status.videos.map((v: { shot_id: string; status: string; local_path?: string; error?: string }) => {
+        <Card title="视频生成进度">
+          <List
+            dataSource={status.videos}
+            renderItem={(v: { shot_id: string; status: string; local_path?: string; error?: string }) => {
               const shot = status.shots?.find((s: { shot_id: string; scene_number?: number; shot_number?: number }) => s.shot_id === v.shot_id)
               return (
-                <div key={v.shot_id} style={{ marginBottom: 24, paddingBottom: 24, borderBottom: '1px solid rgba(255,255,255,0.4)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                    <span style={{ fontSize: 13, color: '#374151', fontWeight: 500 }}>场景{shot?.scene_number}-镜头{shot?.shot_number}</span>
-                    <Tag color={v.status === 'succeeded' ? 'green' : v.status === 'failed' ? 'red' : 'blue'}>
-                      {v.status === 'succeeded' ? '完成' : v.status === 'failed' ? '失败' : '生成中'}
-                    </Tag>
-                  </div>
-                  {v.status === 'running' && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                      <Spin size="small" />
-                      <span style={{ fontSize: 12, color: '#7C3AED' }}>生成中...</span>
-                    </div>
-                  )}
-                  {v.status === 'succeeded' && v.local_path && id && (
-                    <VideoPlayer
-                      src={filesApi.downloadUrl(id, `${v.shot_id}.mp4`)}
-                      title={`场景${shot?.scene_number} · 镜头${shot?.shot_number}`}
-                    />
-                  )}
-                  {v.status === 'failed' && <Text type="danger" size="small">错误: {v.error}</Text>}
-                </div>
+                <List.Item key={v.shot_id}>
+                  <Space vertical align="start">
+                    <Space align="center">
+                      <Text>场景{shot?.scene_number}-镜头{shot?.shot_number}</Text>
+                      <Tag color={v.status === 'succeeded' ? 'green' : v.status === 'failed' ? 'red' : 'blue'}>
+                        {v.status === 'succeeded' ? '完成' : v.status === 'failed' ? '失败' : '生成中'}
+                      </Tag>
+                    </Space>
+                    {v.status === 'running' && (
+                      <Space align="center">
+                        <Spin size="small" />
+                        <Text type="tertiary">生成中...</Text>
+                      </Space>
+                    )}
+                    {v.status === 'succeeded' && v.local_path && episodeId && (
+                      <VideoPlayer
+                        src={filesApi.downloadUrl(episodeId, `${v.shot_id}.mp4`)}
+                        title={`场景${shot?.scene_number} · 镜头${shot?.shot_number}`}
+                      />
+                    )}
+                    {v.status === 'failed' && <Text type="danger" size="small">错误: {v.error}</Text>}
+                    {episodeId && <ShotArtifactPanel episodeId={episodeId} projectId={projectId ?? ''} shotId={v.shot_id} />}
+                  </Space>
+                </List.Item>
               )
-            })}
-          </div>
-        </div>
+            }}
+          />
+        </Card>
       )}
 
       {/* Final video */}
-      {status?.assembled_video_path && id && (
-        <div className="glass-card" style={{ marginBottom: 20 }}>
-          {sectionHeader('✦ 最终成片')}
-          <div className="glass-card-body" style={{ textAlign: 'center' }}>
-            <VideoPlayer src={filesApi.exportUrl(id)} title="完整成片" />
-            <div style={{ marginTop: 20 }}>
-              <Button type="primary" size="large" icon={<IconDownload />} onClick={() => {
-                const a = document.createElement('a')
-                a.href = filesApi.exportUrl(id!)
-                a.download = `${project?.title || 'final'}.mp4`
-                a.click()
-              }} style={{ minWidth: 160 }}>
-                下载完整视频
-              </Button>
-            </div>
-          </div>
-        </div>
+      {status?.assembled_video_path && episodeId && (
+        <Card title="✦ 最终成片">
+          <Space vertical align="start">
+            <VideoPlayer src={filesApi.exportUrl(episodeId)} title="完整成片" />
+            <Button colorful theme="solid" type="primary" icon={<IconDownload />} onClick={() => {
+              const a = document.createElement('a')
+              a.href = filesApi.exportUrl(episodeId!)
+              a.download = `${episode?.title || 'final'}.mp4`
+              a.click()
+            }}>
+              下载完整视频
+            </Button>
+          </Space>
+        </Card>
       )}
 
       {/* Error */}
-      {project.error_message && (
-        <div className="glass-card" style={{ marginBottom: 20, borderColor: 'rgba(220,38,38,0.25)' }}>
-          {sectionHeader('错误信息')}
-          <div className="glass-card-body">
-            <Text type="danger">{project.error_message}</Text>
-          </div>
-        </div>
+      {episode.error_message && (
+        <Card title="错误信息">
+          <Text type="danger">{episode.error_message}</Text>
+        </Card>
       )}
-    </div>
+      </Space>
+    </PageShell>
   )
 }

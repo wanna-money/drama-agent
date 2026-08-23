@@ -50,7 +50,7 @@
 uv sync
 
 # 前端
-cd frontend && npm install
+cd frontend && pnpm install
 ```
 
 ### 2. 配置环境变量
@@ -90,10 +90,10 @@ bash start.sh
 
 # 方式二：分别启动
 # 后端
-uv run uvicorn drama_agent.main:app --reload --port 8000
+uv run uvicorn drama_agent.main:app --reload --port 8888
 
 # 前端（开发模式）
-cd frontend && npm run dev
+cd frontend && pnpm dev
 ```
 
 访问 http://localhost:5173
@@ -101,7 +101,7 @@ cd frontend && npm run dev
 ### 4. 生产构建
 
 ```bash
-cd frontend && npm run build
+cd frontend && pnpm build
 # 静态文件输出到 frontend/dist/，可由 Nginx/FastAPI 静态托管
 ```
 
@@ -146,7 +146,7 @@ drama-agent/
 uv run pytest tests/ -v
 
 # 前端
-cd frontend && npm test
+cd frontend && pnpm test
 ```
 
 ## 支持的 LLM 模型

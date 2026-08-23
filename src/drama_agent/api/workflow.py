@@ -1,196 +1,155 @@
-import asyncio
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from drama_agent.db.session import get_db
-from drama_agent.db.models import Project
-from drama_agent.workflow.graph import get_graph
-from drama_agent.api.websocket import manager
+from drama_agent.db.models import Episode
+from drama_agent.db.enums import LifecycleStatus, JobKind, EventType
+from drama_agent.services import job_service, event_service, cost_service
+from drama_agent.workflow.graph import get_video_graph
+from drama_agent.workflow.pipeline_steps import build_pipeline
 
-router = APIRouter(prefix="/api/projects", tags=["workflow"])
+router = APIRouter(prefix="/api/episodes", tags=["workflow"])
 
 
 class ResumeRequest(BaseModel):
     approved: bool
     notes: str = ""
     edited_prompts: dict[str, str] = {}
+    edited_negative_prompts: dict[str, str] = {}  # prompts_review:shot_id→编辑后的负向 prompt
+    assignments: dict[str, dict[str, str]] = {}   # look_review:scene→char→look_id
+    regenerate_shot_ids: list[str] = []           # keyframes_review:要重生成的镜头
 
 
-async def _run_workflow(project_id: str, initial_state: dict):
-    """Run LangGraph workflow in background, broadcasting events via WebSocket."""
-    from drama_agent.db.session import AsyncSessionLocal
-    from drama_agent.db.models import Project
-    from sqlalchemy import select
-
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": project_id}}
-
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-        if project:
-            project.status = "analyzing"
-            await db.commit()
-
-    try:
-        async for event in graph.astream(initial_state, config=config, stream_mode="values"):
-            current_stage = event.get("current_stage", "")
-            await manager.broadcast(project_id, "stage_change", {
-                "stage": current_stage,
-                "state": _safe_state_summary(event),
-            })
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(Project).where(Project.id == project_id))
-                project = result.scalar_one_or_none()
-                if project:
-                    project.status = current_stage
-                    project.state_snapshot = _safe_state_summary(event)
-                    await db.commit()
-    except Exception as e:
-        await manager.broadcast(project_id, "error", {"message": str(e)})
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Project).where(Project.id == project_id))
-            project = result.scalar_one_or_none()
-            if project:
-                project.status = "failed"
-                project.error_message = str(e)
-                await db.commit()
+async def _get_episode_or_404(db: AsyncSession, episode_id: str) -> Episode:
+    ep = (await db.execute(
+        select(Episode).where(Episode.id == episode_id)
+    )).scalar_one_or_none()
+    if not ep:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return ep
 
 
-def _safe_state_summary(state: dict) -> dict:
-    return {
-        "title": state.get("title"),
-        "current_stage": state.get("current_stage"),
-        "story_analysis": state.get("story_analysis"),
-        "screenplay": state.get("screenplay"),
-        "shots": state.get("shots", []),
-        "prompts": state.get("prompts", []),
-        "videos": state.get("videos", []),
-        "assembled_video_path": state.get("assembled_video_path"),
-    }
-
-
-@router.post("/{project_id}/workflow/start")
-async def start_workflow(project_id: str, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if project.status != "created":
-        raise HTTPException(status_code=409, detail=f"Workflow already started (status: {project.status})")
-
-    existing_refs = (project.state_snapshot or {}).get("character_references", {})
-
-    initial_state = {
-        "project_id": project_id,
-        "title": project.title,
-        "raw_input": project.raw_input,
-        "genre": project.genre,
-        "story_analysis": None,
-        "screenplay": "",
-        "screenplay_approved": False,
-        "screenplay_revision_notes": "",
-        "shots": [],
-        "prompts": [],
-        "prompts_approved": False,
-        "prompt_revision_notes": "",
-        "videos": [],
-        "character_references": existing_refs,
-        "current_stage": "starting",
-        "error": None,
-        "llm_model": project.llm_model,
-        "video_model": project.video_model,
-        "video_provider": project.video_provider,
-        "assembled_video_path": None,
-    }
-
-    background_tasks.add_task(_run_workflow, project_id, initial_state)
-    return {"ok": True, "message": "Workflow started"}
-
-
-async def _resume_workflow(project_id: str, approved: bool, notes: str, edited_prompts: dict):
-    """Resume a paused LangGraph workflow after human review."""
-    from langgraph.types import Command
-    from drama_agent.db.session import AsyncSessionLocal
-    from drama_agent.db.models import Project as Proj
-    from sqlalchemy import select as sel
-
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": project_id}}
-    resume_data = {"approved": approved, "notes": notes, "edited_prompts": edited_prompts}
-    try:
-        async for event in graph.astream(
-            Command(resume=resume_data), config=config, stream_mode="values"
-        ):
-            current_stage = event.get("current_stage", "")
-            await manager.broadcast(project_id, "stage_change", {
-                "stage": current_stage,
-                "state": _safe_state_summary(event),
-            })
-            async with AsyncSessionLocal() as db:
-                res = await db.execute(sel(Proj).where(Proj.id == project_id))
-                p = res.scalar_one_or_none()
-                if p:
-                    p.status = current_stage
-                    p.state_snapshot = _safe_state_summary(event)
-                    await db.commit()
-    except Exception as e:
-        await manager.broadcast(project_id, "error", {"message": str(e)})
-        # Update DB status to failed so the UI reflects the error
-        async with AsyncSessionLocal() as db:
-            res = await db.execute(sel(Proj).where(Proj.id == project_id))
-            p = res.scalar_one_or_none()
-            if p:
-                p.status = "failed"
-                p.error_message = str(e)
-                await db.commit()
-
-
-@router.post("/{project_id}/workflow/resume")
-async def resume_workflow(
-    project_id: str,
-    req: ResumeRequest,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
-):
-    """Resume workflow after human review interrupt."""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    background_tasks.add_task(
-        _resume_workflow, project_id, req.approved, req.notes, req.edited_prompts
+@router.post("/{episode_id}/workflow/start")
+async def start_workflow(episode_id: str, db: AsyncSession = Depends(get_db)):
+    """入队一条 start job(幂等)。worker 后台领取执行。"""
+    ep = await _get_episode_or_404(db, episode_id)
+    if ep.status != LifecycleStatus.CREATED.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workflow already started (status: {ep.status})",
+        )
+    job = await job_service.enqueue(
+        db, JobKind.START, episode_id, dedup_key="start", project_id=ep.project_id
     )
-    return {"ok": True, "message": "Workflow resumed"}
+    ep.status = LifecycleStatus.QUEUED.value
+    await db.flush()
+    await event_service.append_event(
+        db, episode_id, EventType.STAGE_CHANGE, {"lifecycle": "queued"}, project_id=ep.project_id
+    )
+    return {"ok": True, "job_id": job["id"], "message": "Workflow queued"}
 
 
-@router.get("/{project_id}/workflow/status")
-async def get_workflow_status(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+@router.post("/{episode_id}/workflow/resume")
+async def resume_workflow(
+    episode_id: str, req: ResumeRequest, db: AsyncSession = Depends(get_db)
+):
+    """人工审核后入队一条 resume job(幂等,dedup 按当前中断点)。"""
+    ep = await _get_episode_or_404(db, episode_id)
 
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": project_id}}
+    graph = await get_video_graph()
+    config = {"configurable": {"thread_id": episode_id}}
+    state = await graph.aget_state(config)
+    next_nodes = tuple(state.next) if state and getattr(state, "next", ()) else ()
+    if not next_nodes:
+        raise HTTPException(status_code=409, detail="Workflow is not paused at a review step")
+
+    dedup_key = "resume:" + "-".join(next_nodes)
+    payload = {
+        "approved": req.approved,
+        "notes": req.notes,
+        "edited_prompts": req.edited_prompts,
+        "edited_negative_prompts": req.edited_negative_prompts,
+        "assignments": req.assignments,
+        "regenerate_shot_ids": req.regenerate_shot_ids,
+    }
+    job = await job_service.enqueue(
+        db, JobKind.RESUME, episode_id, dedup_key=dedup_key, payload=payload,
+        project_id=ep.project_id,
+    )
+    ep.status = LifecycleStatus.QUEUED.value
+    await db.flush()
+    await event_service.append_event(
+        db, episode_id, EventType.STAGE_CHANGE, {"lifecycle": "queued", "resume": True},
+        project_id=ep.project_id,
+    )
+    return {"ok": True, "job_id": job["id"], "message": "Workflow resume queued"}
+
+
+@router.get("/{episode_id}/workflow/status")
+async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db)):
+    """轻量状态:读投影(Episode 生命周期 + 最近事件摘要),不反序列化整个图状态。"""
+    ep = await _get_episode_or_404(db, episode_id)
+    snapshot = ep.state_snapshot or {}
+    current_stage = snapshot.get("current_stage")
+    paused_at = snapshot.get("paused_at")
+    agg = await cost_service.aggregate_entity(db, episode_id)
+    return {
+        "episode_id": episode_id,
+        "project_id": ep.project_id,
+        "db_status": ep.status,
+        "current_stage": current_stage,
+        "paused_at": paused_at,
+        "shots": snapshot.get("shots", []),
+        "prompts": snapshot.get("prompts", []),
+        "videos": snapshot.get("videos", []),
+        "assembled_video_path": snapshot.get("assembled_video_path"),
+        "story_analysis": snapshot.get("story_analysis"),
+        "screenplay": snapshot.get("screenplay"),
+        "look_assignments": snapshot.get("look_assignments", {}),
+        # 流水线步骤(单一真相在后端 pipeline_steps);中断时以 paused_at 作当前步。
+        # by_node 的键是 current_stage,由 build_pipeline 按 stages 归并到步上。
+        "pipeline": build_pipeline(
+            ep.use_keyframes, paused_at or current_stage, costs=agg["by_node"]
+        ),
+        "cost_total": agg["total"],
+        "cost_unpriced": agg["unpriced"],
+        "cost_tokens_total": agg["tokens_total"],
+        "cost_by_kind": agg["by_kind"],
+        "error_message": ep.error_message,
+    }
+
+
+@router.get("/{episode_id}/workflow/state")
+async def get_workflow_state(episode_id: str, db: AsyncSession = Depends(get_db)):
+    """完整状态:从 checkpointer 读图(重操作,仅在需要完整 state 时用)。"""
+    await _get_episode_or_404(db, episode_id)
+    graph = await get_video_graph()
+    config = {"configurable": {"thread_id": episode_id}}
     try:
         state = await graph.aget_state(config)
-        full_state = state.values if state else {}
+        full = state.values if state else {}
     except Exception:
-        full_state = {}
-
+        full = {}
     return {
-        "project_id": project_id,
-        "db_status": project.status,
-        "current_stage": full_state.get("current_stage"),
-        "screenplay": full_state.get("screenplay"),
-        "shots": full_state.get("shots", []),
-        "prompts": full_state.get("prompts", []),
-        "videos": full_state.get("videos", []),
-        "assembled_video_path": full_state.get("assembled_video_path"),
-        "story_analysis": full_state.get("story_analysis"),
-        "character_references": full_state.get("character_references", {}),
+        "episode_id": episode_id,
+        "current_stage": full.get("current_stage"),
+        "screenplay": full.get("screenplay"),
+        "shots": full.get("shots", []),
+        "prompts": full.get("prompts", []),
+        "videos": full.get("videos", []),
+        "assembled_video_path": full.get("assembled_video_path"),
+        "story_analysis": full.get("story_analysis"),
+        "character_references": full.get("character_references", {}),
         "next": list(state.next) if state else [],
     }
+
+
+@router.get("/{episode_id}/workflow/events")
+async def get_workflow_events(
+    episode_id: str, after_seq: int = 0, db: AsyncSession = Depends(get_db)
+):
+    """游标补拉事件(WebSocket 重连也用此接口)。"""
+    await _get_episode_or_404(db, episode_id)
+    events = await event_service.fetch_since(db, episode_id, after_seq)
+    return {"events": events}

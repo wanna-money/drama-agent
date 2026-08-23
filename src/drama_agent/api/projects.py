@@ -1,59 +1,33 @@
+"""项目(剧集元信息)CRUD。单集流水线在 episodes.py + workflow.py。"""
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from pydantic import BaseModel
 from drama_agent.db.session import get_db
-from drama_agent.db.models import Project
-from drama_agent.config import settings
+from drama_agent.db.models import Project, Episode, Job, Event, VideoArtifact
+from drama_agent.db.enums import Genre
+from drama_agent.services import episode_service, cost_service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 class CreateProjectRequest(BaseModel):
     title: str
-    raw_input: str
-    genre: str = "drama"
-    llm_model: str = "deepseek-v4-pro"
-    video_provider: str = "seedance"
-    video_model: str = ""
-
-
-class ProjectResponse(BaseModel):
-    model_config = {"from_attributes": True}
-
-    id: str
-    title: str
-    status: str
-    genre: str
-    llm_model: str
-    video_provider: str
-    created_at: str
-    updated_at: str
+    genre: Genre = Genre.DRAMA   # 非法值由 pydantic 拒为 422
 
 
 @router.post("", response_model=dict)
 async def create_project(req: CreateProjectRequest, db: AsyncSession = Depends(get_db)):
-    project = Project(
-        id=str(uuid.uuid4()),
-        title=req.title,
-        raw_input=req.raw_input,
-        genre=req.genre,
-        llm_model=req.llm_model,
-        video_provider=req.video_provider,
-        video_model=req.video_model,
-        status="created",
-    )
+    project = Project(id=str(uuid.uuid4()), title=req.title, genre=req.genre.value)
     db.add(project)
     await db.commit()
     await db.refresh(project)
     return {
         "id": project.id,
         "title": project.title,
-        "status": project.status,
         "genre": project.genre,
-        "llm_model": project.llm_model,
-        "video_provider": project.video_provider,
+        "status": "empty",  # 新项目还没有集
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }
@@ -61,38 +35,45 @@ async def create_project(req: CreateProjectRequest, db: AsyncSession = Depends(g
 
 @router.get("")
 async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
-    projects = result.scalars().all()
-    return [
-        {
+    projects = (await db.execute(
+        select(Project).order_by(Project.created_at.desc())
+    )).scalars().all()
+    out = []
+    for p in projects:
+        status = await episode_service.project_status(db, p.id)
+        # 逐个项目算成本(N+1 查询;项目数量级小,先接受,必要时再改批量聚合)
+        cost = await cost_service.project_total(db, p.id)
+        out.append({
             "id": p.id,
             "title": p.title,
-            "status": p.status,
             "genre": p.genre,
-            "video_provider": p.video_provider,
+            "status": status,
+            "cost_total": cost["total"],
+            "cost_unpriced": cost["unpriced"],
             "created_at": p.created_at.isoformat(),
             "updated_at": p.updated_at.isoformat(),
-        }
-        for p in projects
-    ]
+        })
+    return out
 
 
 @router.get("/{project_id}")
 async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id)
+    )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    episodes = await episode_service.list_by_project(db, project_id)
+    status = episode_service.aggregate_project_status([e["status"] for e in episodes])
+    cost = await cost_service.project_total(db, project_id)
     return {
         "id": project.id,
         "title": project.title,
-        "raw_input": project.raw_input,
-        "status": project.status,
         "genre": project.genre,
-        "llm_model": project.llm_model,
-        "video_provider": project.video_provider,
-        "state_snapshot": project.state_snapshot,
-        "error_message": project.error_message,
+        "status": status,
+        "episodes": episodes,
+        "cost_total": cost["total"],
+        "cost_unpriced": cost["unpriced"],
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }
@@ -100,10 +81,16 @@ async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/{project_id}")
 async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id)
+    )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    # 级联清理该项目下所有集及其 jobs/events/artifacts(事务内)
+    await db.execute(delete(Job).where(Job.project_id == project_id))
+    await db.execute(delete(Event).where(Event.project_id == project_id))
+    await db.execute(delete(VideoArtifact).where(VideoArtifact.project_id == project_id))
+    await db.execute(delete(Episode).where(Episode.project_id == project_id))
     await db.delete(project)
     await db.commit()
     return {"ok": True}

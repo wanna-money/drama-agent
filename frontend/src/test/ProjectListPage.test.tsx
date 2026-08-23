@@ -9,8 +9,15 @@ vi.mock('../services/api', () => ({
   projectsApi: {
     list: vi.fn(),
     delete: vi.fn(),
+    create: vi.fn(),
   },
 }))
+
+const mockNavigate = vi.fn()
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return { ...actual, useNavigate: () => mockNavigate }
+})
 
 import ProjectListPage from '../pages/ProjectListPage'
 import { projectsApi } from '../services/api'
@@ -20,9 +27,7 @@ const mockProject = {
   id: 'proj-1',
   title: '测试项目',
   genre: 'drama',
-  status: 'created',
-  video_provider: 'seedance',
-  llm_model: 'deepseek-v4-pro',
+  status: 'running',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }
@@ -49,19 +54,6 @@ describe('ProjectListPage', () => {
     vi.mocked(projectsApi.list).mockResolvedValue([mockProject])
     renderPage()
     await waitFor(() => expect(screen.getByText('测试项目')).toBeInTheDocument())
-  })
-
-  it('maps video_provider to display label', async () => {
-    vi.mocked(projectsApi.list).mockResolvedValue([mockProject])
-    renderPage()
-    await waitFor(() => expect(screen.getByText('Seedance 2.0')).toBeInTheDocument())
-    expect(screen.queryByText('seedance')).not.toBeInTheDocument()
-  })
-
-  it('maps bailian provider to display label', async () => {
-    vi.mocked(projectsApi.list).mockResolvedValue([{ ...mockProject, video_provider: 'bailian' }])
-    renderPage()
-    await waitFor(() => expect(screen.getByText('万相 2.7')).toBeInTheDocument())
   })
 
   it('shows error state when API fails', async () => {
@@ -129,5 +121,32 @@ describe('ProjectListPage', () => {
     const opts = (Modal as any)._lastConfirm.current
     expect(opts.content).not.toContain('正在制作中')
     expect(opts.content).toContain('无法恢复')
+  })
+
+  it('creates a project via the modal and navigates to it', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([])
+    vi.mocked(projectsApi.create).mockResolvedValue({ ...mockProject, id: 'new-1', title: '新剧' })
+    renderPage()
+    await waitFor(() => screen.getByText('还没有作品'))
+    // 空态下顶部「新建项目」按钮常驻,点它打开弹窗
+    fireEvent.click(screen.getByText('新建项目'))
+    // 填剧名(genre 有默认 drama)
+    fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '  新剧  ' } })
+    // 点确定 → submitForm → onSubmit → create
+    fireEvent.click(screen.getByText('创建项目'))
+    await waitFor(() =>
+      expect(projectsApi.create).toHaveBeenCalledWith({ title: '新剧', genre: 'drama' })
+    )
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/projects/new-1'))
+  })
+
+  it('does not create when title is empty (validation blocks submit)', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([])
+    renderPage()
+    await waitFor(() => screen.getByText('还没有作品'))
+    fireEvent.click(screen.getByText('新建项目'))
+    fireEvent.click(screen.getByText('创建项目'))
+    await waitFor(() => expect(screen.getByText('请输入剧名')).toBeInTheDocument())
+    expect(projectsApi.create).not.toHaveBeenCalled()
   })
 })

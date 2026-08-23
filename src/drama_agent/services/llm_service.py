@@ -1,40 +1,51 @@
-from openai import AsyncOpenAI
-from drama_agent.config import settings
+"""LLM 服务:薄封装,委派给 provider 适配层(registry 解析 + protocol 调用)。
+
+不再按模型名前缀硬编码路由;model → provider → protocol 三跳解析。
+对外 complete() 仍返回纯 str(现有节点调用签名不变)。
+"""
 import json
 import re
 
-
-# Model prefix → (api_key_attr, base_url_attr)
-_MODEL_ROUTING: list[tuple[str, str, str]] = [
-    ("kimi-",           "kimi_api_key",       "kimi_base_url"),
-    ("glm-",            "glm_api_key",        "glm_base_url"),
-    ("minimax-",        "minimax_api_key",    "minimax_base_url"),
-]
+from drama_agent import provider as provider_pkg
+from drama_agent.provider.llm.protocols import LLMResult, get_llm_protocol
+from drama_agent.services import usage_service
 
 
-def _resolve_client(model: str) -> tuple[AsyncOpenAI, str]:
-    """Return (AsyncOpenAI client, actual_model_name) for the given model string."""
-    # Check drama custom endpoint first (exact match on drama_text_model)
-    if settings.drama_text_model and model == settings.drama_text_model:
-        api_key = settings.drama_api_key or "placeholder"
-        client = AsyncOpenAI(api_key=api_key, base_url=settings.drama_base_url or None)
-        return client, model
-
-    lower = model.lower()
-    for prefix, key_attr, url_attr in _MODEL_ROUTING:
-        if lower.startswith(prefix):
-            api_key = getattr(settings, key_attr, "") or "placeholder"
-            base_url = getattr(settings, url_attr, "")
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
-            return client, model
-
-    # Fallback: use drama endpoint
-    api_key = settings.drama_api_key or "placeholder"
-    client = AsyncOpenAI(api_key=api_key, base_url=settings.drama_base_url or None)
-    return client, model
+def _provider_id(model: str | None) -> str:
+    """记账用的 provider 名(仅展示,不参与成本计算)。解析失败不阻断主流程。"""
+    if not model:
+        return ""
+    try:
+        prov, _ = provider_pkg.provider_registry.resolve_model(model)
+        return prov.id
+    except Exception:  # noqa: BLE001 — 记账旁路,provider 名缺失可接受
+        return ""
 
 
 class LLMService:
+    async def complete_result(
+        self,
+        system: str,
+        user: str,
+        temperature: float = 0.7,
+        model: str | None = None,
+    ) -> LLMResult:
+        """完整结果(含 usage),供计费统计;内部层。"""
+        if not model:
+            raise ValueError("model must be specified")
+        # 动态查 registry,便于测试重绑
+        registry = provider_pkg.provider_registry
+        prov, mdl = registry.resolve_model(model)
+        protocol = get_llm_protocol(prov.protocol)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return await protocol.complete(
+            prov, mdl, messages=messages,
+            temperature=temperature, max_tokens=8000,
+        )
+
     async def complete(
         self,
         system: str,
@@ -42,23 +53,12 @@ class LLMService:
         temperature: float = 0.7,
         model: str | None = None,
     ) -> str:
-        """Simple completion returning text. Uses per-call model routing."""
-        if not model:
-            raise ValueError("model must be specified")
-        client, actual_model = _resolve_client(model)
-
-        kwargs: dict = dict(
-            model=actual_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            max_tokens=8000,
+        """简单补全,返回文本(对外层,拆包 LLMResult.text + 记账)。"""
+        result = await self.complete_result(system, user, temperature=temperature, model=model)
+        await usage_service.record_llm(
+            result.usage or {}, provider=_provider_id(model), model=model or ""
         )
-
-        response = await client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        return result.text
 
     async def complete_json(
         self,
@@ -67,12 +67,17 @@ class LLMService:
         temperature: float = 0.3,
         model: str | None = None,
     ) -> dict:
-        """Completion that parses JSON response, stripping any markdown fences."""
+        """补全并解析 JSON,剥离可能的 markdown 围栏。"""
         system_with_json = (
             system + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
-        text = await self.complete(system_with_json, user, temperature=temperature, model=model)
-        return self._parse_json(text)
+        result = await self.complete_result(
+            system_with_json, user, temperature=temperature, model=model
+        )
+        await usage_service.record_llm(
+            result.usage or {}, provider=_provider_id(model), model=model or ""
+        )
+        return self._parse_json(result.text)
 
     @staticmethod
     def _parse_json(text: str) -> dict:

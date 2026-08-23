@@ -1,45 +1,57 @@
-"""Tests for LLM service."""
+"""Tests for LLM service (delegates to provider adapter layer)."""
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 from drama_agent.services.llm_service import LLMService
+from drama_agent.provider.llm.protocols import LLMResult
 
 
-def _make_mock_client(content: str):
-    mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices[0].message.content = content
-    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-    return mock_client
+@pytest.fixture
+def builtin_registry():
+    """装一个含内置声明的 registry 单例(resolve_model 需要能解析内置 model)。
+    registry 已收敛为仅从 env+DB 合成,单测里不跑 DB seed,故直接用代码内置声明构建。"""
+    import drama_agent.provider as provider_pkg
+    from drama_agent.provider.registry import ProviderRegistry
+    orig = provider_pkg.provider_registry
+    provider_pkg.provider_registry = ProviderRegistry(
+        builtin=provider_pkg._builtin_providers(), custom_providers=[]
+    )
+    yield
+    provider_pkg.provider_registry = orig
+
+
+def _patch_protocol(content: str):
+    """Patch the LLM protocol so complete() returns `content` without a real client."""
+    return patch(
+        "drama_agent.provider.llm.protocols.OpenAICompatProtocol.complete",
+        new=AsyncMock(return_value=LLMResult(text=content)),
+    )
 
 
 @pytest.mark.asyncio
-async def test_complete_json_strips_markdown_fences():
+async def test_complete_json_strips_markdown_fences(builtin_registry):
     """complete_json should strip ```json ... ``` wrappers."""
-    mock_client = _make_mock_client('```json\n{"key": "value"}\n```')
-    with patch("drama_agent.services.llm_service._resolve_client", return_value=(mock_client, "deepseek-v4-pro")):
+    with _patch_protocol('```json\n{"key": "value"}\n```'):
         from drama_agent.services.llm_service import llm_service
-        result = await llm_service.complete_json("system", "user", model="test-model")
+        result = await llm_service.complete_json("system", "user", model="deepseek-v4-pro")
         assert result == {"key": "value"}
 
 
 @pytest.mark.asyncio
-async def test_complete_json_plain_json():
+async def test_complete_json_plain_json(builtin_registry):
     """complete_json should parse plain JSON without fences."""
-    mock_client = _make_mock_client('{"name": "test", "count": 3}')
-    with patch("drama_agent.services.llm_service._resolve_client", return_value=(mock_client, "deepseek-v4-pro")):
+    with _patch_protocol('{"name": "test", "count": 3}'):
         from drama_agent.services.llm_service import llm_service
-        result = await llm_service.complete_json("system", "user", model="test-model")
+        result = await llm_service.complete_json("system", "user", model="deepseek-v4-pro")
         assert result["name"] == "test"
         assert result["count"] == 3
 
 
 @pytest.mark.asyncio
-async def test_complete_json_invalid_json_returns_empty():
+async def test_complete_json_invalid_json_returns_empty(builtin_registry):
     """complete_json should return {} when LLM returns malformed JSON."""
-    mock_client = _make_mock_client('not valid json at all {{{}')
-    with patch("drama_agent.services.llm_service._resolve_client", return_value=(mock_client, "deepseek-v4-pro")):
+    with _patch_protocol('not valid json at all {{{}'):
         from drama_agent.services.llm_service import llm_service
-        result = await llm_service.complete_json("system", "user", model="test-model")
+        result = await llm_service.complete_json("system", "user", model="deepseek-v4-pro")
         assert result == {}
 
 

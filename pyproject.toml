@@ -13,7 +13,6 @@ dependencies = [
     "openai>=1.50",
     "volcengine-python-sdk[ark]>=5.0",
     "dashscope>=1.20",
-    "chromadb>=0.5",
     "sqlalchemy>=2.0",
     "aiosqlite>=0.20",
     "pydantic>=2.0",
@@ -28,6 +27,7 @@ dependencies = [
     "tenacity>=8.0",
     "structlog>=24.0",
     "greenlet>=3.5.0",
+    "mutagen>=1.47",
 ]
 
 [project.optional-dependencies]

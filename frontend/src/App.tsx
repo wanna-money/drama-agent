@@ -1,115 +1,93 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
-import { Layout } from '@douyinfe/semi-ui'
+import { createBrowserRouter, RouterProvider, Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Layout, Nav, Button, Space, Typography } from '@douyinfe/semi-ui'
+import { IconArrowLeft } from '@douyinfe/semi-icons'
 import ProjectListPage from './pages/ProjectListPage'
 import NewProjectPage from './pages/NewProjectPage'
+import ProjectEpisodesPage from './pages/ProjectEpisodesPage'
+import NewEpisodePage from './pages/NewEpisodePage'
 import ProjectDetailPage from './pages/ProjectDetailPage'
+import ProvidersPage from './pages/ProvidersPage'
+import AssetsPage from './pages/AssetsPage'
+import CharactersPage from './pages/CharactersPage'
+import ScriptsPage from './pages/ScriptsPage'
+import ScriptDetailPage from './pages/ScriptDetailPage'
 
 const { Header, Content } = Layout
+const { Text } = Typography
 
 const NAV_ITEMS = [
-  { key: '/', label: '作品列表' },
-  { key: '/new', label: '新建项目' },
+  { itemKey: '/', text: '作品列表' },
+  { itemKey: '/scripts', text: '剧本' },
+  { itemKey: '/assets', text: '素材库' },
+  { itemKey: '/providers', text: '模型管理' },
 ]
 
-function CinemaNav() {
+// 顶级页(导航目的地)不显示返回 —— 那里"返回上一页"没有意义
+const TOP_LEVEL = ['/', '/scripts', '/assets', '/providers']
+
+function RootLayout() {
   const location = useLocation()
   const navigate = useNavigate()
-  const active = location.pathname === '/new' ? '/new' : '/'
+  const selected = location.pathname.startsWith('/providers')
+    ? '/providers'
+    : location.pathname.startsWith('/assets')
+      ? '/assets'
+      : location.pathname.startsWith('/scripts')
+        ? '/scripts'
+        : '/'
+  const showBack = !TOP_LEVEL.includes(location.pathname)
+  // 返回浏览器历史上一页;若是直接打开的深链接(无历史)则兜底回作品列表
+  const goBack = () => { if (location.key !== 'default') navigate(-1); else navigate('/') }
 
   return (
-    <nav style={{ display: 'flex', gap: 2 }}>
-      {NAV_ITEMS.map(item => (
-        <button
-          key={item.key}
-          onClick={() => navigate(item.key)}
-          style={{
-            background: active === item.key ? 'rgba(124,58,237,0.08)' : 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            padding: '6px 16px',
-            borderRadius: '100px',
-            fontSize: 13,
-            fontFamily: 'inherit',
-            fontWeight: active === item.key ? 600 : 400,
-            color: active === item.key ? '#7C3AED' : '#6B7280',
-            transition: 'all 0.18s',
-          }}
-          onMouseEnter={e => {
-            if (active !== item.key) {
-              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(124,58,237,0.05)'
-              ;(e.currentTarget as HTMLButtonElement).style.color = '#7C3AED'
-            }
-          }}
-          onMouseLeave={e => {
-            if (active !== item.key) {
-              (e.currentTarget as HTMLButtonElement).style.background = 'transparent'
-              ;(e.currentTarget as HTMLButtonElement).style.color = '#6B7280'
-            }
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
-    </nav>
+    <Layout style={{ minHeight: '100vh' }}>
+      <Header style={{ backgroundColor: 'var(--semi-color-bg-1)' }}>
+        <Nav
+          mode="horizontal"
+          selectedKeys={[selected]}
+          onSelect={({ itemKey }) => navigate(itemKey as string)}
+          items={NAV_ITEMS}
+          header={
+            <Space align="center">
+              {showBack && (
+                <Button
+                  theme="borderless" type="tertiary" icon={<IconArrowLeft />}
+                  onClick={goBack}
+                >返回</Button>
+              )}
+              <Text strong>Drama Agent</Text>
+            </Space>
+          }
+        />
+      </Header>
+      <Content style={{ display: 'flex', flexDirection: 'column', padding: '24px' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', width: '100%' }}>
+          <Outlet />
+        </div>
+      </Content>
+    </Layout>
   )
 }
 
+const router = createBrowserRouter([
+  {
+    element: <RootLayout />,
+    children: [
+      { path: '/', element: <ProjectListPage /> },
+      { path: '/new', element: <NewProjectPage /> },
+      { path: '/projects/:id', element: <ProjectEpisodesPage /> },
+      { path: '/projects/:id/characters', element: <CharactersPage /> },
+      { path: '/projects/:id/episodes/new', element: <NewEpisodePage /> },
+      { path: '/episodes/:episodeId', element: <ProjectDetailPage /> },
+      { path: '/providers', element: <ProvidersPage /> },
+      { path: '/assets', element: <AssetsPage /> },
+      { path: '/scripts', element: <ScriptsPage /> },
+      { path: '/scripts/:id', element: <ScriptDetailPage /> },
+      { path: '*', element: <Navigate to="/" /> },
+    ],
+  },
+])
+
 export default function App() {
-  return (
-    <BrowserRouter>
-      <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
-        <Header
-          style={{
-            background: 'rgba(255,255,255,0.65)',
-            backdropFilter: 'blur(24px)',
-            WebkitBackdropFilter: 'blur(24px)',
-            borderBottom: '1px solid rgba(255,255,255,0.85)',
-            boxShadow: '0 1px 12px rgba(100,80,180,0.08)',
-            padding: '0 32px',
-            height: 58,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            position: 'sticky',
-            top: 0,
-            zIndex: 100,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
-            {/* Logo */}
-            <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
-              <span style={{
-                fontSize: 17,
-                fontWeight: 800,
-                background: 'linear-gradient(135deg, #7C3AED, #3B82F6)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-                letterSpacing: '-0.3px',
-              }}>
-                Drama Agent
-              </span>
-              <span style={{ fontSize: 9, letterSpacing: '2px', color: '#9CA3AF', textTransform: 'uppercase', marginTop: 1 }}>
-                AI Short Film Studio
-              </span>
-            </div>
-            <CinemaNav />
-          </div>
-          <span style={{ fontSize: 11, color: '#D1D5DB', letterSpacing: '1px', textTransform: 'uppercase', fontWeight: 500 }}>
-            Powered by LangGraph
-          </span>
-        </Header>
-        <Content style={{ background: 'transparent', position: 'relative', zIndex: 1 }}>
-          <div className="page-container">
-            <Routes>
-              <Route path="/" element={<ProjectListPage />} />
-              <Route path="/new" element={<NewProjectPage />} />
-              <Route path="/projects/:id" element={<ProjectDetailPage />} />
-              <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
-          </div>
-        </Content>
-      </Layout>
-    </BrowserRouter>
-  )
+  return <RouterProvider router={router} />
 }
