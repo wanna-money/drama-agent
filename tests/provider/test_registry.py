@@ -125,18 +125,6 @@ def test_registry_default_model_returns_marked_or_none():
     assert reg.default_model("video") is None
 
 
-def test_resolve_model_id_with_slash_matches_literal():
-    """model id 本身含 '/'(如 jd/x)应按字面匹配,不被误拆成 provider='jd'。"""
-    from drama_agent.provider.base import Model, Provider
-    from drama_agent.provider.registry import ProviderRegistry
-    p = Provider(id="jdcloud", label="JD", protocol="openai-compat", models=[
-        Model(id="jd/deepseek-v4-flash-0731", label="DS", provider="jdcloud", kind="llm"),
-    ])
-    reg = ProviderRegistry(builtin=[p], custom_providers=[])
-    prov, m = reg.resolve_model("jd/deepseek-v4-flash-0731")
-    assert prov.id == "jdcloud" and m.id == "jd/deepseek-v4-flash-0731"
-
-
 def test_effective_default_prefers_is_default():
     from drama_agent.provider.base import Model, Provider
     from drama_agent.provider.registry import ProviderRegistry

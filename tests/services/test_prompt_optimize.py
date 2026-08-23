@@ -90,20 +90,18 @@ async def test_optimize_non_character_no_four_view(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_default_llm_model_prefers_marked_default(monkeypatch):
-    """_default_llm_model 应优先返回 is_default 的模型,而非"第一个可用"。
-    否则会误用第一个 provider 的 endpoint/凭证(如把 jdcloud key 发去 DeepSeek → 401)。"""
     from drama_agent.services import prompt_optimize_service as p
     from drama_agent.provider.base import Model
 
     class _Reg:
         # 有效默认 = is_default 优先,否则首个可用(此处 is_default 命中)
         def effective_default(self, kind):
-            return Model(id="jd/deepseek-v4-flash-0731", label="JD",
-                         provider="jdcloud-ds", kind="llm")
+            return Model(id="deepseek-v4-flash-0731", label="DS",
+                         provider="ds", kind="llm")
 
     import drama_agent.provider as pp
     monkeypatch.setattr(pp, "provider_registry", _Reg())
-    assert p._default_llm_model() == "jd/deepseek-v4-flash-0731"
+    assert p._default_llm_model() == "deepseek-v4-flash-0731"
 
 
 @pytest.mark.asyncio

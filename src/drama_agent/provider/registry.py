@@ -60,8 +60,7 @@ class ProviderRegistry:
            → 造临时 fallback model + warning
         3) provider 都不认识 → raise ValueError
         """
-        # 优先按字面 model id 精确匹配 —— 容许 id 本身含 '/'(如 jd/deepseek-v4-flash-0731),
-        # 避免被下方 "provider/model" 语法误拆成 provider="jd"。
+        # 优先按字面 model id 精确匹配 —— 容许 id 本身含 '/'(如 deepseek-v4-flash-0731),
         if provider_hint is None and model in self._models:
             return self._models[model]
 

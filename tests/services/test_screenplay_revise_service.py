@@ -19,7 +19,7 @@ async def test_turn_apply_returns_new_screenplay_and_summary():
                 {"role": "assistant", "content": "好的,计划是把台词改幽默,确认吗?"},
                 {"role": "user", "content": "确认"},
             ],
-            model="jd/deepseek-v4-flash-0731",
+            model="deepseek-v4-flash-0731",
         )
 
     assert result == {
