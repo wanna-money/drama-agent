@@ -2,15 +2,13 @@
 import asyncio
 from sqlalchemy import select
 from drama_agent.db import session as db_session
-from drama_agent.db.models import Episode, Script
-from drama_agent.db.enums import LifecycleStatus, EventType, JobKind
+from drama_agent.db.models import Episode
+from drama_agent.db.enums import LifecycleStatus, EventType
 from drama_agent.services import job_service, event_service
 from drama_agent.workflow import runner
 import structlog
 
 logger = structlog.get_logger()
-
-SCRIPT_KINDS = {JobKind.SCRIPT_START.value, JobKind.SCRIPT_RESUME.value}
 
 
 class JobWorker:
@@ -53,9 +51,8 @@ class JobWorker:
                 # attempts 判定读 DB 真值(见 fail_or_requeue),不用领取时的快照
                 outcome = await job_service.fail_or_requeue(s, job_id, str(e))
                 if outcome == "failed":
-                    is_script = job["kind"] in SCRIPT_KINDS
                     await self._fail_entity(
-                        s, job["episode_id"], job.get("project_id", ""), str(e), is_script=is_script
+                        s, job["episode_id"], job.get("project_id", ""), str(e)
                     )
         finally:
             hb_task.cancel()
@@ -69,23 +66,15 @@ class JobWorker:
         except asyncio.CancelledError:
             pass
 
-    async def _fail_entity(
-        self, s, entity_id: str, project_id: str, error: str, *, is_script: bool
-    ) -> None:
-        """job 终态失败时把实体(Script/Episode)标 FAILED + 落错误,避免僵尸 running。"""
-        row: Script | Episode | None
-        if is_script:
-            row = (await s.execute(
-                select(Script).where(Script.id == entity_id)
-            )).scalar_one_or_none()
-        else:
-            row = (await s.execute(
-                select(Episode).where(Episode.id == entity_id)
-            )).scalar_one_or_none()
+    async def _fail_entity(self, s, episode_id: str, project_id: str, error: str) -> None:
+        """job 终态失败时把 Episode 标 FAILED + 落错误,避免僵尸 running。"""
+        row = (await s.execute(
+            select(Episode).where(Episode.id == episode_id)
+        )).scalar_one_or_none()
         if row:
             row.status = LifecycleStatus.FAILED.value
             row.error_message = error
             await s.flush()
         await event_service.append_event(
-            s, entity_id, EventType.ERROR, {"message": error}, project_id=project_id
+            s, episode_id, EventType.ERROR, {"message": error}, project_id=project_id
         )

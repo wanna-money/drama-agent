@@ -20,6 +20,10 @@ export interface Episode {
   episode_number: number
   title: string
   script_id: string
+  /** 从故事开始时用户输入的原始故事文本(复用剧本的集为空) */
+  raw_input?: string | null
+  /** 集级目标时长(秒),驱动剧本篇幅与分镜总时长 */
+  target_seconds?: number
   status: string
   llm_model: string
   video_provider: string
@@ -36,11 +40,16 @@ export interface Episode {
 export interface CreateProjectData {
   title: string
   genre?: string
+  source_text?: string                    // 小说正文(小说模式)
+  target_episodes?: number                // 切分依据二选一
+  target_seconds_per_episode?: number
 }
 
 export interface CreateEpisodeData {
   title: string
-  script_id: string
+  script_id?: string        // 复用剧本(与 raw_input 二选一)
+  raw_input?: string        // 从故事直接开始(与 script_id 二选一)
+  target_seconds?: number   // 集级目标时长(秒)
   llm_model?: string
   video_provider?: string
   video_model?: string
@@ -50,19 +59,36 @@ export interface CreateEpisodeData {
   keyframe_image_model?: string
 }
 
+/** 开拍前可改的字段(只传要改的那些)。 */
+export interface UpdateEpisodeData {
+  title?: string
+  raw_input?: string
+  target_seconds?: number
+}
+
 export interface WorkflowStatus {
   episode_id: string
   project_id: string
   db_status: string
   current_stage: string
   paused_at?: string | null
+  /** 投影说暂停、图里已无状态 —— 该集无法继续,只能重置重跑。后端判定,前端只提示。 */
+  state_lost?: boolean
   screenplay?: string
   shots?: Shot[]
+  total_duration_seconds?: number   // 真实成片时长(各镜头之和),后端算好下发,前端不自算
   prompts?: Prompt[]
   videos?: Video[]
   assembled_video_path?: string
   story_analysis?: StoryAnalysis
   look_assignments?: Record<string, Record<string, string>>
+  /** 本集阵容:角色名 → Character.id(cast_review 确认后写入) */
+  cast?: Record<string, string>
+  /** 待确认身份的剧本人物;非空即表示停在"确认角色"步 */
+  cast_pending?: CastPending[]
+  screenplay_versions?: ScreenplayVersion[]     // 剧本版本树(后端 Episode 列下发,审核面板据此渲染)
+  screenplay_version_current?: number
+  duration_over_target?: boolean    // 分镜压到每镜下限仍超集级目标 → 提示退回重做(后端唯一真相)
   pipeline?: { steps: { key: string; label: string; cost?: number }[]; current: string | null }
   cost_total?: number
   cost_unpriced?: boolean
@@ -124,6 +150,8 @@ export interface ResumeData {
   edited_negative_prompts?: Record<string, string>
   assignments?: Record<string, Record<string, string>>
   regenerate_shot_ids?: string[]
+  /** cast_review:角色名 → {action: 'link'|'create', character_id?} */
+  cast?: Record<string, { action: string; character_id?: string }>
 }
 
 export interface LLMModelOption {
@@ -245,9 +273,10 @@ export const charactersApi = {
     return api.post<Look>(`/projects/${pid}/characters/${cid}/looks/${lid}/views/${view}`, form,
       { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data)
   },
+  // views 为 null = 后端自动裁切失败(生成本身成功),前端拿 sheet_b64 转人工裁切
   generateSheet: (pid: string, cid: string, lid: string,
     body: { model_id: string; character_desc?: string; look_desc?: string }) =>
-    api.post<{ views: Record<CharacterViewName, string> }>(
+    api.post<{ sheet_b64: string; views: Record<CharacterViewName, string> | null }>(
       `/projects/${pid}/characters/${cid}/looks/${lid}/generate-sheet`, body).then(r => r.data),
   saveGeneratedViews: (pid: string, cid: string, lid: string,
     body: { front_b64: string; side_b64?: string; back_b64?: string; face_b64?: string }) =>
@@ -280,6 +309,39 @@ export const projectsApi = {
   delete: (id: string) => api.delete(`/projects/${id}`).then(r => r.data),
 }
 
+export interface AdaptationDraftItem {
+  index: number
+  title: string
+  screenplay: string
+}
+
+export type AdaptationStatus = 'none' | 'adapting' | 'draft_ready' | 'failed' | 'committed'
+
+export interface AdaptationState {
+  adaptation_status: AdaptationStatus
+  adapted_draft: AdaptationDraftItem[]
+  source_text: string
+  target_episodes?: number | null
+  target_seconds_per_episode?: number | null
+}
+
+/** 作品级「小说改编 → 分集切分」。状态与守卫的唯一权威在后端,前端只消费。 */
+export const adaptationApi = {
+  start: (projectId: string) =>
+    api.post<{ job_id: string; adaptation_status: AdaptationStatus }>(
+      `/projects/${projectId}/adapt`).then(r => r.data),
+  get: (projectId: string) =>
+    api.get<AdaptationState>(`/projects/${projectId}/adaptation`).then(r => r.data),
+  saveDraft: (projectId: string, draft: AdaptationDraftItem[]) =>
+    api.put<AdaptationState>(`/projects/${projectId}/adaptation/draft`, { draft }).then(r => r.data),
+  commit: (projectId: string, body: {
+    llm_model?: string; video_provider?: string; video_model?: string
+    resolution?: string; use_keyframes?: boolean
+  } = {}) =>
+    api.post<{ episodes: Episode[]; adaptation_status: AdaptationStatus }>(
+      `/projects/${projectId}/adaptation/commit`, body).then(r => r.data),
+}
+
 export const episodesApi = {
   list: (projectId: string) =>
     api.get<Episode[]>(`/projects/${projectId}/episodes`).then(r => r.data),
@@ -287,6 +349,9 @@ export const episodesApi = {
     api.get<Episode>(`/projects/${projectId}/episodes/${episodeId}`).then(r => r.data),
   create: (projectId: string, data: CreateEpisodeData) =>
     api.post<Episode>(`/projects/${projectId}/episodes`, data).then(r => r.data),
+  /** 开拍前修改本集(标题/故事内容/目标时长)。已开拍时后端返回 409。 */
+  update: (projectId: string, episodeId: string, data: UpdateEpisodeData) =>
+    api.patch<Episode>(`/projects/${projectId}/episodes/${episodeId}`, data).then(r => r.data),
   delete: (projectId: string, episodeId: string) =>
     api.delete(`/projects/${projectId}/episodes/${episodeId}`).then(r => r.data),
 }
@@ -294,16 +359,13 @@ export const episodesApi = {
 export interface Script {
   id: string
   project_id?: string | null
-  episode_index?: number | null
   title: string
   genre: string
   source_text?: string | null
   story_analysis?: StoryAnalysis | null
   content?: string | null
-  status: string                 // 生命周期:created(草稿)/queued/running/paused/completed/failed
-  error_message?: string | null
+  project_title?: string | null  // 所属作品名(后端一次查好;散稿为 null)
   created_at?: string
-  updated_at?: string
 }
 
 export interface ScreenplayVersion {
@@ -312,55 +374,15 @@ export interface ScreenplayVersion {
   created_at: string | null
 }
 
-export interface ScriptStatus {
-  id: string
-  status: string
-  paused_at?: string | null
-  title: string
-  content?: string | null
-  story_analysis?: StoryAnalysis | null
-  error_message?: string | null
-  screenplay_versions?: ScreenplayVersion[]
-  screenplay_version_current?: number
-}
-
-export interface CreateScriptData {
-  title: string
-  genre?: string
-  source_text: string
-  project_id?: string | null
-  llm_model?: string
-}
-
+/** 剧本库瘦身为只读复用素材:剧本只由「某集剧本通过后存入」产生,不再有生成/审核生命周期。
+ * 审核类端点(revise/edit/revert/resume)已迁到 workflowApi 的剧集维度。 */
 export const scriptsApi = {
   list: (projectId?: string) =>
     api.get<Script[]>('/scripts', { params: { project_id: projectId } }).then(r => r.data),
   get: (id: string) => api.get<Script>(`/scripts/${id}`).then(r => r.data),
-  create: (data: CreateScriptData) => api.post<Script>('/scripts', data).then(r => r.data),
-  update: (id: string, data: { title?: string; content?: string }) =>
-    api.put<Script>(`/scripts/${id}`, data).then(r => r.data),
+  saveFromEpisode: (episodeId: string) =>
+    api.post<Script>('/scripts', { episode_id: episodeId }).then(r => r.data),
   delete: (id: string) => api.delete(`/scripts/${id}`).then(r => r.data),
-  start: (id: string) => api.post(`/scripts/${id}/start`).then(r => r.data),
-  retry: (id: string) => api.post(`/scripts/${id}/retry`).then(r => r.data),
-  resume: (id: string, data: { approved: boolean; notes?: string; edited_prompts?: Record<string, string> }) =>
-    api.post(`/scripts/${id}/resume`, data).then(r => r.data),
-  status: (id: string) => api.get<ScriptStatus>(`/scripts/${id}/status`).then(r => r.data),
-  revise: (id: string, messages: { role: string; content: string }[]) =>
-    api.post<{
-      action: 'ask' | 'apply'
-      reply: string
-      screenplay?: string
-      version_index?: number
-      versions_len?: number
-    }>(`/scripts/${id}/revise`, { messages }).then(r => r.data),
-  editScreenplay: (id: string, screenplay: string) =>
-    api.post<{ screenplay: string; version_index: number }>(
-      `/scripts/${id}/edit_screenplay`, { screenplay }
-    ).then(r => r.data),
-  revert: (id: string, versionIndex: number) =>
-    api.post<{ screenplay: string; version_index: number }>(
-      `/scripts/${id}/revert`, { version_index: versionIndex }
-    ).then(r => r.data),
 }
 
 export const workflowApi = {
@@ -371,6 +393,45 @@ export const workflowApi = {
     api.get<{ events: Array<{ seq: number; type: string; payload_json: Record<string, any> }> }>(
       `/episodes/${episodeId}/workflow/events`, { params: { after_seq: afterSeq } }
     ).then(r => r.data.events),
+  // 剧本审核(剧集页):AI 对话式改写 / 手动编辑 / 版本回退。守卫在后端(须暂停在 screenplay_review)。
+  reviseEpisode: (episodeId: string, messages: { role: string; content: string }[]) =>
+    api.post<{
+      action: 'ask' | 'apply'
+      reply: string
+      screenplay?: string
+      version_index?: number
+      versions_len?: number
+    }>(`/episodes/${episodeId}/screenplay/revise`, { messages }).then(r => r.data),
+  editEpisode: (episodeId: string, screenplay: string) =>
+    api.post<{ screenplay: string; version_index: number }>(
+      `/episodes/${episodeId}/screenplay/edit`, { screenplay }
+    ).then(r => r.data),
+  revertEpisode: (episodeId: string, versionIndex: number) =>
+    api.post<{ screenplay: string; version_index: number }>(
+      `/episodes/${episodeId}/screenplay/revert`, { version_index: versionIndex }
+    ).then(r => r.data),
+}
+
+/** 参考图用途分类。取值与后端 ReferenceType 枚举一一对应。 */
+export type ReferenceType = 'character' | 'background'
+
+/**
+ * 一条参考图。ref_type 与 removable 都由后端判定下发,前端只消费、**不得**自行推断
+ * (按名字反猜类型会把素材库选的图判进错误的组;自行判断可删性会与后端的探测规则分叉)。
+ * image_url 为空串 = 已列出但未上传。见规范 4。
+ */
+export interface ReferenceEntry {
+  key: string
+  ref_type: ReferenceType
+  image_url: string
+  removable?: boolean
+}
+
+/** 一个待确认身份的剧本人物。候选角色由后端算好下发,前端不自己拉角色列表(规范 4)。 */
+export interface CastPending {
+  name: string
+  appearance?: string
+  suggestions: { character_id: string; name: string }[]
 }
 
 export const filesApi = {
@@ -398,12 +459,12 @@ export const filesApi = {
   exportUrl: (episodeId: string) => `/api/episodes/${episodeId}/export`,
   downloadUrl: (episodeId: string, filename: string) => `/api/episodes/${episodeId}/files/${filename}`,
   getReferences: (episodeId: string) =>
-    api.get<{ character_references: Record<string, string> }>(`/episodes/${episodeId}/references`)
-      .then(r => r.data.character_references).catch(() => ({} as Record<string, string>)),
-  updateReferences: (episodeId: string, references: Array<{ key: string; ref_type: string; image_url: string }>) =>
-    api.put<{ ok: boolean; character_references: Record<string, string> }>(
+    api.get<{ references: ReferenceEntry[] }>(`/episodes/${episodeId}/references`)
+      .then(r => r.data.references ?? []).catch(() => [] as ReferenceEntry[]),
+  updateReferences: (episodeId: string, references: ReferenceEntry[]) =>
+    api.put<{ ok: boolean; references: ReferenceEntry[] }>(
       `/episodes/${episodeId}/references`, { references }
-    ).then(r => r.data),
+    ).then(r => r.data.references ?? []),
 }
 
 export const artifactsApi = {

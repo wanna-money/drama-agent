@@ -24,16 +24,30 @@ _VIEW_KEY = {
 }
 
 
-async def create_character(project_id: str, name: str, description: str | None = None):
+async def create_character(project_id: str, name: str, description: str | None = None,
+                           appearance: str | None = None):
+    """appearance 是 AI 抽出的外貌描述(喂模型用),与人手写的 description 分列同行。"""
     from drama_agent.db import session as db_session
     from drama_agent.db.models import Character
     async with db_session.AsyncSessionLocal() as s:
         row = Character(id=str(uuid.uuid4()), project_id=project_id, name=name,
-                        description=description)
+                        description=description, appearance=appearance)
         s.add(row)
         await s.commit()
         await s.refresh(row)
         return row
+
+
+async def get_appearance(character_id: str) -> str | None:
+    """按 id 取外貌描述(给模型吃的那份)。**按 id 而非名字** —— 角色改名不断链。"""
+    from drama_agent.db import session as db_session
+    from drama_agent.db.models import Character
+    async with db_session.AsyncSessionLocal() as s:
+        row = (await s.execute(
+            select(Character).where(Character.id == character_id))).scalar_one_or_none()
+    if row is None:
+        return None
+    return row.appearance or row.description
 
 
 async def list_characters(project_id: str):
@@ -71,7 +85,7 @@ async def get_look(look_id: str):
 
 
 async def update_character(character_id: str, *, name: str | None = None,
-                           description: str | None = None):
+                           description: str | None = None, appearance: str | None = None):
     from drama_agent.db import session as db_session
     from drama_agent.db.models import Character
     async with db_session.AsyncSessionLocal() as s:
@@ -83,6 +97,8 @@ async def update_character(character_id: str, *, name: str | None = None,
             row.name = name
         if description is not None:
             row.description = description
+        if appearance is not None:
+            row.appearance = appearance
         await s.commit()
         await s.refresh(row)
         return row

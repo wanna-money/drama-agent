@@ -50,7 +50,7 @@ async def _new_script() -> str:
     from drama_agent.db.models import Script
     sid = str(uuid.uuid4())
     async with db_session.AsyncSessionLocal() as s:
-        s.add(Script(id=sid, title="剧", source_text="x", content="正文", status="completed"))
+        s.add(Script(id=sid, title="剧", source_text="x", content="正文"))
         await s.commit()
     return sid
 

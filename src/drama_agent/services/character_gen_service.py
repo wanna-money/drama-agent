@@ -24,8 +24,17 @@ def _sheet_prompt(character_desc: str, look_desc: str) -> str:
     )
 
 
+class CropFailed(ValueError):
+    """自动识别四视图分界失败。调用方据此引导人工裁切,而不是拿一份猜出来的切法。"""
+
+
 def crop_four_views(sheet: bytes) -> tuple[bytes, bytes, bytes, bytes]:
-    """按白底竖向空隙切成 front/side/back/face;找不到三条内部空隙则等分四份。"""
+    """按白底竖向空隙切成 front/side/back/face。
+
+    找不到恰好三条内部空隙 → 抛 CropFailed。**不要加等分兜底**:等分线与真实人物位置
+    不符时会把相邻视图切进同一张图,而错切与正切在返回值里无法区分,调用方与用户都
+    无从判断这次切得对不对。宁可显式失败、转人工裁切。
+    """
     img = Image.open(BytesIO(sheet)).convert("RGB")
     w, h = img.size
     gray = img.convert("L")
@@ -53,11 +62,12 @@ def crop_four_views(sheet: bytes) -> tuple[bytes, bytes, bytes, bytes]:
     internal = sorted(((s, e) for s, e in runs if s > 0 and e < w),
                       key=lambda r: r[1] - r[0], reverse=True)
     cuts = sorted((s + e) // 2 for s, e in internal[:3])
-    if len(cuts) == 3:
-        bounds = [(0, cuts[0]), (cuts[0], cuts[1]), (cuts[1], cuts[2]), (cuts[2], w)]
-    else:
-        t = w // 4
-        bounds = [(0, t), (t, 2 * t), (2 * t, 3 * t), (3 * t, w)]
+    if len(cuts) != 3:
+        raise CropFailed(
+            f"未能自动识别四视图分界(只找到 {len(cuts)} 条留白间隔,需要 3 条):"
+            "请确认图为纯白背景、四个视图横向排列且彼此之间留白清晰,或改用手动裁切"
+        )
+    bounds = [(0, cuts[0]), (cuts[0], cuts[1]), (cuts[1], cuts[2]), (cuts[2], w)]
     out = []
     for x0, x1 in bounds:
         buf = BytesIO()
@@ -68,9 +78,17 @@ def crop_four_views(sheet: bytes) -> tuple[bytes, bytes, bytes, bytes]:
 
 async def generate_four_view_sheet(
     character_desc: str, look_desc: str, model_id: str, size: str = "2048x576"
-) -> tuple[bytes, bytes, bytes, bytes]:
+) -> tuple[bytes, tuple[bytes, bytes, bytes, bytes] | None]:
+    """返回 (原始 sheet, 四视图) —— 裁切失败时后者为 None 而非抛错。
+
+    sheet 原图必须一并回传:裁切失败时前端要拿它做人工裁切,只回裁切结果就把原图丢了。
+    """
     prompt = _sheet_prompt(character_desc, look_desc)
     images = await asset_gen_service.generate_image(model_id, prompt, size=size, n=1)
     if not images:
         raise ValueError("图片模型未返回结果")
-    return crop_four_views(images[0])
+    sheet = images[0]
+    try:
+        return sheet, crop_four_views(sheet)
+    except CropFailed:
+        return sheet, None

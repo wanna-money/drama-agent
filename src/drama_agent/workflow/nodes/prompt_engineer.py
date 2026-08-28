@@ -1,13 +1,15 @@
 from drama_agent.workflow.state import DramaState, PromptDict
 from drama_agent.workflow.constants import ReferenceRole, SHOT_TYPE_DESC
+from drama_agent.workflow.prompt_rules import system_prompt
 from drama_agent.knowledge.store import knowledge_store
-from drama_agent.db import session as db_session
-from drama_agent.services import character_service
 from drama_agent.services.llm_service import llm_service
 
-SYSTEM = """You are an expert video generation prompt engineer.
+SYSTEM = system_prompt("""You are an expert video generation prompt engineer.
 Create precise, effective prompts for AI video generation models.
-Focus on visual elements: subject, action, environment, lighting, camera, mood, quality."""
+Focus on visual elements: subject, action, environment, lighting, camera, mood, quality.""")
+
+# 未上传参考图/模型无专属指引时的默认负向提示词(中文,与输出语言规则一致)
+DEFAULT_NEGATIVE_PROMPT = "模糊、画质低、水印、字幕、文字叠加、肢体畸变"
 
 
 def _guide_key_for(model_id: str) -> str | None:
@@ -55,7 +57,7 @@ Cinematography rules:
 
 Video provider: {provider}
 Model-specific prompt guide:
-{chr(10).join(f"- {g}" for g in (guides or [])) if guides else "- (no model-specific guide; write a clear, cinematic prompt in the language that model expects)"}
+{chr(10).join(f"- {g}" for g in (guides or [])) if guides else "- (无该模型专属指引,按通用电影化写法组织画面)"}
 """
     notes = (notes or "").strip()
     if notes:
@@ -73,70 +75,67 @@ Generate:
 Return JSON:
 {{
   "prompt_text": "...",
-  "negative_prompt": "blurry, low quality, watermark, text overlay, ..."
+  "negative_prompt": "{DEFAULT_NEGATIVE_PROMPT}、..."
 }}"""
     return SYSTEM, user_prompt
 
 
 async def prompt_engineer_node(state: DramaState) -> dict:
+    from drama_agent.services import character_entity_service as ce
     shots = state["shots"]
     provider = state.get("video_provider", "seedance")
-    project_id = state["project_id"]
     revision_notes = state.get("prompt_revision_notes") or None
+    cast = state.get("cast") or {}
     prompts: list[PromptDict] = []
 
     if not shots:
         return {"prompts": prompts, "prompts_approved": False, "current_stage": "prompts_ready"}
 
-    async with db_session.AsyncSessionLocal() as session:
-        # 一次运行只有一个视频模型 → guide 全镜头共用,循环外解析一次
-        guide_key = _guide_key_for(provider)
-        guides = knowledge_store.retrieve("prompt_guide", key=guide_key) if guide_key else []
-        for i, shot in enumerate(shots):
-            # 领域知识:Dify 检索(失败降级常量),按镜头类型/运镜取
-            tmpl_key = f"{guide_key}:{shot['shot_type']}" if guide_key else shot["shot_type"]
-            templates = knowledge_store.retrieve("prompt_template", key=tmpl_key, k=2)
-            cin_rules = knowledge_store.retrieve("cinematography", key="camera", k=1)
+    # 一次运行只有一个视频模型 → guide 全镜头共用,循环外解析一次
+    guide_key = _guide_key_for(provider)
+    guides = knowledge_store.retrieve("prompt_guide", key=guide_key) if guide_key else []
+    for i, shot in enumerate(shots):
+        # 领域知识:Dify 检索(失败降级常量),按镜头类型/运镜取
+        tmpl_key = f"{guide_key}:{shot['shot_type']}" if guide_key else shot["shot_type"]
+        templates = knowledge_store.retrieve("prompt_template", key=tmpl_key, k=2)
+        cin_rules = knowledge_store.retrieve("cinematography", key="camera", k=1)
 
-            # 角色外貌上下文(PG)
-            char_descriptions = []
-            for char_name in shot.get("characters", []):
-                desc = await character_service.get(session, project_id, char_name)
-                if desc:
-                    char_descriptions.append(f"{char_name}: {desc}")
+        # 角色外貌上下文:按 cast 的 character_id 取(**不按名字 join**)——
+        # 角色改名后仍取得到,这是 cast_review 确认身份换来的收益。
+        char_descriptions = []
+        for char_name in shot.get("characters", []):
+            cid = cast.get(char_name)
+            if not cid:
+                continue
+            desc = await ce.get_appearance(cid)
+            if desc:
+                char_descriptions.append(f"{char_name}: {desc}")
 
-            # Determine reference image for continuity — actual URL filled in by video_generator
-            reference_image_url = None
-            reference_role = None
-            if i > 0:
-                reference_role = ReferenceRole.FIRST_FRAME.value
+        # 首帧连贯标记(实际 URL 由 video_generator 用上一镜末帧填)。
+        # 角色主体参考图**不在这里取** —— 那条路已收敛到 subject_ref_service,
+        # 否则同一角色的图会被这里和 video_generator 各投一次(规范 4)。
+        reference_image_url = None
+        reference_role = ReferenceRole.FIRST_FRAME.value if i > 0 else None
 
-            # For character shots, also consider subject_reference
-            if shot.get("characters") and state.get("character_references"):
-                first_char = shot["characters"][0]
-                if first_char in state["character_references"]:
-                    reference_image_url = state["character_references"][first_char]
-                    reference_role = ReferenceRole.SUBJECT_REFERENCE.value
+        system, user_prompt = build_prompt(
+            shot, char_descriptions, templates, cin_rules, provider, guides, notes=revision_notes)
 
-            system, user_prompt = build_prompt(
-                shot, char_descriptions, templates, cin_rules, provider, guides, notes=revision_notes)
+        result = await llm_service.complete_json(
+            system, user_prompt, temperature=0.4, model=state.get("llm_model"))
 
-            result = await llm_service.complete_json(
-                system, user_prompt, temperature=0.4, model=state.get("llm_model"))
-
-            prompt: PromptDict = {
-                "shot_id": shot["shot_id"],
-                "prompt_text": result.get("prompt_text", shot["description"]),
-                "negative_prompt": result.get(
-                    "negative_prompt", "blurry, low quality, watermark"),
-                "reference_image_url": reference_image_url,
-                "reference_role": reference_role,
-                "approved": False,
-                "edited_prompt": None,
-                "edited_negative_prompt": None,
-                "keyframe_url": None,
-            }
-            prompts.append(prompt)
+        prompt: PromptDict = {
+            "shot_id": shot["shot_id"],
+            "prompt_text": result.get("prompt_text", shot["description"]),
+            "negative_prompt": result.get(
+                "negative_prompt", DEFAULT_NEGATIVE_PROMPT),
+            "reference_image_url": reference_image_url,
+            "reference_role": reference_role,
+            "approved": False,
+            "edited_prompt": None,
+            "edited_negative_prompt": None,
+            "keyframe_url": None,
+        }
+        prompts.append(prompt)
 
     return {
         "prompts": prompts,

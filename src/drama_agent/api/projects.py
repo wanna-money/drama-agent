@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from drama_agent.db.session import get_db
 from drama_agent.db.models import Project, Episode, Job, Event, VideoArtifact
 from drama_agent.db.enums import Genre
@@ -15,11 +15,26 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 class CreateProjectRequest(BaseModel):
     title: str
     genre: Genre = Genre.DRAMA   # 非法值由 pydantic 拒为 422
+    # 小说模式(可选):有正文时切分依据须恰好二选一
+    source_text: str | None = None
+    # 必须为正数:非正值会原样进改编 prompt(如"切成恰好 -3 集"),且 0 会被下面的
+    # bool() 二选一校验当成"没给"
+    target_episodes: int | None = Field(default=None, gt=0)
+    target_seconds_per_episode: int | None = Field(default=None, gt=0)
 
 
 @router.post("", response_model=dict)
 async def create_project(req: CreateProjectRequest, db: AsyncSession = Depends(get_db)):
-    project = Project(id=str(uuid.uuid4()), title=req.title, genre=req.genre.value)
+    if (req.source_text or "").strip() and (
+        bool(req.target_episodes) == bool(req.target_seconds_per_episode)
+    ):
+        raise HTTPException(status_code=422, detail="切分依据须二选一:集数 或 每集时长")
+    project = Project(
+        id=str(uuid.uuid4()), title=req.title, genre=req.genre.value,
+        source_text=req.source_text,
+        target_episodes=req.target_episodes,
+        target_seconds_per_episode=req.target_seconds_per_episode,
+    )
     db.add(project)
     await db.commit()
     await db.refresh(project)
@@ -28,6 +43,7 @@ async def create_project(req: CreateProjectRequest, db: AsyncSession = Depends(g
         "title": project.title,
         "genre": project.genre,
         "status": "empty",  # 新项目还没有集
+        "adaptation_status": project.adaptation_status,
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }

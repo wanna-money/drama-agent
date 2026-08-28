@@ -34,6 +34,16 @@ class PromptDict(TypedDict):
     keyframe_url: str | None
 
 
+class ReferenceDict(TypedDict):
+    """背景参考图条目。角色形象不走这里 —— 见 services/reference_service 模块注释。
+
+    历史数据里可能仍有 ref_type=character 的条目(读时兼容,不丢用户数据),
+    但界面与下游都不再消费它们。
+    """
+    key: str                 # 场景地点(background);历史条目可能是角色名
+    ref_type: str            # ReferenceType enum value (db/enums.py)
+    image_url: str           # 空串 = 已列出但尚未上传(占位)
+
 class VideoDict(TypedDict):
     shot_id: str
     task_id: str             # provider task ID
@@ -60,16 +70,28 @@ class DramaState(TypedDict):
     episode_id: str          # 本集 = LangGraph thread 身份
     episode_number: int
     title: str
+    script_id: str | None    # 复用剧本来源(null = 从故事开始)
     raw_input: str
     genre: str
 
     story_analysis: StoryAnalysis | None
+
+    # 本集阵容:角色名 → Character.id。由 cast_review 确认后写入,下游一律按 id 取角色
+    # (改名不断链)。不落独立表 —— 身份在作品级 Character,这里只是本集的解析结果。
+    cast: dict[str, str]
+    # 待人工确认的角色身份(名单外的新名字)。cast_resolve 写、cast_review 消费;
+    # 确认后清空。必须在状态里(而非只在 interrupt 载荷里)前端才读得到。
+    cast_pending: list[dict]
 
     screenplay: str
     screenplay_approved: bool
     screenplay_revision_notes: str
 
     shots: list[ShotDict]
+    target_seconds: int              # 集级目标时长(秒),驱动分镜总时长收敛
+    storyboard_approved: bool        # 分镜是否已通过审核
+    storyboard_revision_notes: str   # 分镜被打回时的人工意见(重生成参考)
+    duration_over_target: bool       # 压到每镜下限仍超目标(前端据此提示退回重做)
 
     prompts: list[PromptDict]
     prompts_approved: bool
@@ -80,7 +102,9 @@ class DramaState(TypedDict):
     keyframes_approved: bool
 
     videos: list[VideoDict]
-    character_references: dict[str, str]   # name -> image_url
+    # 背景参考图清单(唯一真相,带 ref_type)。**角色形象不在这里** —— 走造型(Look),
+    # 由 subject_ref_service 下发。旧的 character_references 已废弃(读时兼容升级)。
+    references: list[ReferenceDict]
 
     look_assignments: dict[str, dict[str, str]]
     look_assignments_approved: bool

@@ -5,8 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pathlib import Path
 from drama_agent.db.session import get_db
-from drama_agent.db.models import Project, Episode
-from drama_agent.db.enums import LifecycleStatus
+from drama_agent.db.models import Project, Episode, Script
+from drama_agent.db.enums import (
+    ImageType, LifecycleStatus, SERVABLE_IMAGE_TYPES, UPLOADABLE_IMAGE_TYPES,
+)
+from drama_agent.services import reference_service
 from drama_agent.services.storage_service import storage_service
 
 # 图片(角色/背景参考图)按项目共享 → project 级路由
@@ -14,7 +17,6 @@ img_router = APIRouter(prefix="/api/projects", tags=["files"])
 # 引用绑定 / 视频产物 → episode 级路由(引用存在每集图状态里,视频是每集产物)
 router = APIRouter(prefix="/api/episodes", tags=["files"])
 
-ALLOWED_IMAGE_TYPES = {"character", "background", "reference"}
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
@@ -52,7 +54,7 @@ async def upload_reference_image(
     ext = Path(file.filename or "upload.jpg").suffix.lower()
     if ext not in ALLOWED_IMAGE_EXTS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
-    image_type = type if type in ALLOWED_IMAGE_TYPES else "reference"
+    image_type = type if type in UPLOADABLE_IMAGE_TYPES else ImageType.REFERENCE.value
     content = await file.read()
     unique_name, _ = await storage_service.save_project_image(
         project_id, content, file.filename or "upload.jpg", image_type
@@ -80,7 +82,7 @@ async def copy_from_asset(
     content = await asset_service.read_asset_bytes(req.asset_id)
     if content is None:
         raise HTTPException(status_code=404, detail="素材文件不存在")
-    image_type = req.type if req.type in ALLOWED_IMAGE_TYPES else "reference"
+    image_type = req.type if req.type in UPLOADABLE_IMAGE_TYPES else ImageType.REFERENCE.value
     filename = (asset.name or "asset") + (Path(asset.storage_key).suffix or ".png")
     unique_name, _ = await storage_service.save_project_image(
         project_id, content, filename, image_type
@@ -106,7 +108,9 @@ async def list_project_images(
 
 @img_router.get("/{project_id}/images/{image_type}/{filename}")
 async def serve_project_image(project_id: str, image_type: str, filename: str):
-    if image_type not in ALLOWED_IMAGE_TYPES:
+    # 可读取的类型比可上传的多一个 keyframe(关键帧节点生成、不接受上传);
+    # 用 SERVABLE 而非 UPLOADABLE 判断,否则关键帧图 URL 一律 400、缩略图必然坏掉。
+    if image_type not in SERVABLE_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Invalid image type")
     image_dir = storage_service.get_project_image_dir(project_id, image_type)
     file_path = _safe_path(image_dir, filename)
@@ -118,67 +122,84 @@ async def serve_project_image(project_id: str, image_type: str, filename: str):
 # ── 引用绑定:集级(存在每集图状态里) ───────────────────────────────
 class ReferenceEntry(BaseModel):
     key: str
-    ref_type: str
-    image_url: str
+    ref_type: str        # ReferenceType(character/background),非法值 → 400
+    image_url: str = ""  # 空串 = 已列出但未上传
+    # 角色实体关联(Character.id)。前端原样回传后端下发的值,不自己造。
+    character_id: str | None = None
 
 
 class UpdateReferencesRequest(BaseModel):
     references: list[ReferenceEntry]
 
 
+async def _reference_source(db: AsyncSession, ep: Episode) -> dict:
+    """凑出 reference_service 需要的读取源:已存清单 + 用于补占位的 story_analysis/shots。
+
+    图状态(跑起来后最权威)覆盖 state_snapshot;created 态还没有图状态,则从源剧本借
+    story_analysis —— 这样开拍前就能看到角色清单并预上传参考图。
+    """
+    source: dict = dict(ep.state_snapshot or {})
+    if ep.status != LifecycleStatus.CREATED.value:
+        try:
+            from drama_agent.workflow.graph import get_graph
+            graph = await get_graph()
+            state = await graph.aget_state({"configurable": {"thread_id": ep.id}})
+            if state and state.values:
+                source.update(
+                    {k: v for k, v in state.values.items() if v not in (None, [], {})}
+                )
+        except Exception:  # noqa: BLE001 — checkpointer 不可用时退回快照,不该让面板整体挂掉
+            pass
+    if not source.get("story_analysis") and ep.script_id:
+        sc = (await db.execute(
+            select(Script).where(Script.id == ep.script_id)
+        )).scalar_one_or_none()
+        if sc and sc.story_analysis:
+            source["story_analysis"] = sc.story_analysis
+    return source
+
+
 @router.put("/{episode_id}/references")
 async def update_references(
     episode_id: str, req: UpdateReferencesRequest, db: AsyncSession = Depends(get_db)
 ):
-    """更新角色/背景参考图绑定,回写到该集 LangGraph 状态。"""
-    ep = await _get_episode_or_404(db, episode_id)
+    """整表替换角色/背景参考图清单(前端每次提交完整列表),回写图状态与快照。
 
-    new_refs: dict[str, str] = {}
-    for entry in req.references:
-        if entry.image_url:
-            new_refs[entry.key] = entry.image_url
+    ref_type 在此真正落地 —— 类型是后端持久化的权威,不再让前端按 key 反猜。
+    """
+    ep = await _get_episode_or_404(db, episode_id)
+    try:
+        references = reference_service.normalize(e.model_dump() for e in req.references)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if ep.status != LifecycleStatus.CREATED.value:
         try:
-            from drama_agent.workflow.graph import get_video_graph
-            graph = await get_video_graph()
-            config = {"configurable": {"thread_id": episode_id}}
-            state = await graph.aget_state(config)
-            if state and state.values:
-                existing = dict(state.values.get("character_references", {}))
-                existing.update(new_refs)
-                cleared = {e.key for e in req.references if not e.image_url}
-                for k in cleared:
-                    existing.pop(k, None)
-                await graph.aupdate_state(config, {"character_references": existing})
-                new_refs = existing
-        except Exception:
+            from drama_agent.workflow.graph import get_graph
+            graph = await get_graph()
+            await graph.aupdate_state(
+                {"configurable": {"thread_id": episode_id}}, {"references": references}
+            )
+        except Exception:  # noqa: BLE001 — 图不可写时仍落快照,下次启动由 runner 带回
             pass
 
     snapshot = dict(ep.state_snapshot or {})
-    snapshot["character_references"] = new_refs
+    snapshot["references"] = references
+    snapshot.pop("character_references", None)   # 旧字段已废弃,写入时顺手清掉
     ep.state_snapshot = snapshot
     await db.commit()
-    return {"ok": True, "character_references": new_refs}
+    return {"ok": True, "references": references}
 
 
 @router.get("/{episode_id}/references")
 async def get_references(episode_id: str, db: AsyncSession = Depends(get_db)):
+    """完整参考图清单:已绑定的 + 探测出的未上传占位,每条带权威 ref_type。
+
+    前端直接渲染本结果 —— 分组、占位、类型都不在前端算(规范 4)。
+    """
     ep = await _get_episode_or_404(db, episode_id)
-    refs: dict[str, str] = {}
-    if ep.status != LifecycleStatus.CREATED.value:
-        try:
-            from drama_agent.workflow.graph import get_video_graph
-            graph = await get_video_graph()
-            config = {"configurable": {"thread_id": episode_id}}
-            state = await graph.aget_state(config)
-            if state and state.values:
-                refs = state.values.get("character_references", {})
-        except Exception:
-            pass
-    if not refs and ep.state_snapshot:
-        refs = ep.state_snapshot.get("character_references", {})
-    return {"character_references": refs}
+    source = await _reference_source(db, ep)
+    return {"references": reference_service.build_list(source)}
 
 
 # ── 视频产物:集级(每集输出目录 {project_id}/{episode_id}/) ─────────

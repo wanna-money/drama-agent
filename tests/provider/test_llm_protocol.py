@@ -23,6 +23,8 @@ def _mock_openai(content="hi", prompt_tokens=10, completion_tokens=5):
     client = MagicMock()
     resp = MagicMock()
     resp.choices[0].message.content = content
+    resp.choices[0].message.tool_calls = None   # 无工具调用
+    resp.choices[0].finish_reason = "stop"      # 真实字符串,MagicMock 过不了 LLMResult 校验
     resp.usage.prompt_tokens = prompt_tokens
     resp.usage.completion_tokens = completion_tokens
     client.chat.completions.create = AsyncMock(return_value=resp)

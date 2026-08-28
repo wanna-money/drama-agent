@@ -128,4 +128,6 @@ def test_registry_dify_fail_falls_back_to_constant(monkeypatch):
     biz = r._by_kind["prompt_template"]
     monkeypatch.setattr(biz, "_post", MagicMock(side_effect=httpx.ConnectError("down")))
     out = r.retrieve("prompt_template", key="CU", k=2)
-    assert out and any("Close-up" in x or "近景" in x for x in out)
+    # 降级后拿到的必须是 constant 后端里 CU 这一桶(证明降级路径也保住了 key 路由)
+    from drama_agent.knowledge.constants import PROMPT_TEMPLATES
+    assert out and out[0] in PROMPT_TEMPLATES["seedance"]["CU"]

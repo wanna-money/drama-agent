@@ -3,6 +3,7 @@ import base64
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
+from PIL import UnidentifiedImageError
 from pydantic import BaseModel
 
 from drama_agent.db.enums import CharacterView
@@ -150,20 +151,30 @@ async def upload_view(pid: str, cid: str, lid: str, view: str, file: UploadFile 
 
 @router.post("/projects/{pid}/characters/{cid}/looks/{lid}/generate-sheet")
 async def generate_sheet(pid: str, cid: str, lid: str, body: GenSheetIn):
+    """生成四视图 sheet 并尝试自动裁切。
+
+    始终回传 sheet_b64(原图);自动裁切失败时 views=None,前端据此转人工裁切
+    —— 生成本身是成功的,不该因为切不开而整体报错让用户重新烧一次生成。
+    """
     char = await _verify_char(pid, cid)
     await _verify_look(pid, cid, lid)
     desc = body.character_desc or char.description or char.name
     look_desc = body.look_desc or ""
     try:
-        front, side, back, face = await character_gen_service.generate_four_view_sheet(
+        sheet, views = await character_gen_service.generate_four_view_sheet(
             desc, look_desc, body.model_id)
     except NotImplementedError as e:
         raise HTTPException(501, str(e) or "当前图片模型不支持生成")
     except ValueError as e:
         raise HTTPException(422, str(e))
     enc = lambda b: base64.b64encode(b).decode()  # noqa: E731
-    return {"views": {"front": enc(front), "side": enc(side), "back": enc(back),
-                      "face": enc(face)}}
+    return {
+        "sheet_b64": enc(sheet),
+        "views": None if views is None else {
+            "front": enc(views[0]), "side": enc(views[1]),
+            "back": enc(views[2]), "face": enc(views[3]),
+        },
+    }
 
 
 @router.post("/projects/{pid}/characters/{cid}/looks/{lid}/views-from-generated")
@@ -191,10 +202,18 @@ async def views_from_generated(pid: str, cid: str, lid: str, body: ViewsFromGene
 
 @router.post("/projects/{pid}/characters/{cid}/looks/{lid}/import-from-asset")
 async def import_from_asset(pid: str, cid: str, lid: str, body: ImportFromAsset):
-    """从素材库人物 Asset 导入:切四视图填入 Look。"""
+    """从素材库人物 Asset 导入:切四视图填入 Look。
+
+    错误分层:素材/造型不存在 → 404(数据问题);图片打不开或切不开 → 422(内容问题,
+    前端据此引导人工裁切)。两者混成同一个码,前端就无从判断该不该弹裁切器。
+    """
     await _verify_look(pid, cid, lid)
     try:
         row = await character_import_service.import_asset_as_look_views(lid, body.asset_id)
+    except character_gen_service.CropFailed as e:
+        raise HTTPException(422, str(e))
+    except UnidentifiedImageError:
+        raise HTTPException(422, "素材文件不是可识别的图片")
     except ValueError as e:
         raise HTTPException(404, str(e))
     if row is None:

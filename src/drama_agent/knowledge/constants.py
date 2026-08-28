@@ -5,14 +5,14 @@
 
 PROMPT_TEMPLATES: dict[str, dict[str, list[str]]] = {
     "seedance": {
-        "CU": ["Seedance CU shot template: Close-up shot, [subject] with [emotion] expression, "
-               "[lighting] light, cinematic quality, shallow depth of field, 4K"],
-        "LS": ["Seedance LS shot template: Long shot, [subject] in [environment], "
-               "[camera_movement] camera movement, establishing atmosphere, cinematic wide angle"],
-        "MS": ["Seedance MS shot template: Medium shot, [subject] [action], [lighting] lighting, "
-               "film-quality, natural color grading"],
-        "ELS": ["Seedance ELS template: Extreme long shot, vast [environment] with [subject] tiny "
-                "in frame, epic scale, aerial perspective, cinematic landscape"],
+        "CU": ["Seedance 特写模板:特写镜头,[主体] 带着 [情绪] 的表情,[光线] 光照,"
+               "电影级质感,浅景深,4K"],
+        "LS": ["Seedance 全景模板:全景镜头,[主体] 置于 [环境] 中,[运镜] 运镜,"
+               "建立氛围,电影级广角"],
+        "MS": ["Seedance 中景模板:中景镜头,[主体] 正在 [动作],[光线] 光照,"
+               "电影质感,自然调色"],
+        "ELS": ["Seedance 大远景模板:大远景,辽阔的 [环境] 中 [主体] 在画面里极小,"
+                "史诗尺度,航拍视角,电影感风景"],
     },
 }
 
@@ -32,45 +32,47 @@ PROMPT_GUIDES: dict[str, list[str]] = {
     ],
     "minimax": [
         "结构:时长与画幅 + 题材风格 + 素材序号映射 + 核心剧情 + 镜别与情绪 + 声音。"
-        "开头就点明时长与画幅(如「15s, 9:16 vertical」);输出 768P/2K、时长 4-15 秒整数;提示词上限 7000 字符。英文为主,中文亦可。",
-        "运镜用方括号紧跟在关键描述之后:[pan]、[zoom]、[static]——这是 H3 特有的相机控制写法。",
+        "开头就点明时长与画幅(如「15秒,9:16 竖屏」);输出 768P/2K、时长 4-15 秒整数;提示词上限 7000 字符。"
+        "正文用简体中文书写。",
+        "运镜用方括号紧跟在关键描述之后:[pan]、[zoom]、[static]——这是 H3 特有的相机控制写法,"
+        "方括号内保留英文控制词,其余描述用中文。",
         "多素材按上传顺序用序数指代并说明各自用途:"
-        "'appearance follows reference images 1 and 2; motion follows reference video 1'。",
+        "「外观参照 参考图1 与 参考图2;动作参照 参考视频1」。",
         "H3 原生生成音频,声音需求直接写进提示词(环境音、音色、配乐节奏)。",
         "竖屏短剧推荐写法:画幅 + 题材(如 ReelShort/DramaBox 风格)+ 人物与场景图映射 + 剧情主线 + "
-        "'medium-close and close shots for eye contact and tension' 这类镜别情绪指示。",
+        "「以中近景与特写承载眼神交流与张力」这类镜别情绪指示。",
     ],
     "all": [
-        "Character continuity: for consistent appearance across shots, include detailed physical "
-        "description in every prompt: hair color, clothing color/style, build, distinctive features.",
-        "Frame chaining: with first_frame reference, keep subject position, lighting direction, "
-        "color temperature; add 'seamlessly continuing from previous shot, consistent lighting and color'.",
+        "角色一致性:为保证跨镜头外观稳定,每条提示词都要写全外貌细节 —— 发色、服装颜色与款式、"
+        "体型、显著特征。",
+        "首帧衔接:使用 first_frame 参考图时,保持主体位置、光线方向、色温一致,"
+        "并补一句「与上一镜无缝衔接,光线与色调保持一致」。",
     ],
 }
 
 CINEMATOGRAPHY: dict[str, list[str]] = {
-    "shot_type": ["Shot types: ELS establishes vast environment; LS full body/location; MS waist "
-                  "up for dialogue; CU face for emotion; ECU eyes/hands for intense detail"],
-    "camera": ["Camera movements: static stable; pan horizontal; tilt vertical; dolly toward/away; "
-               "zoom focal change; tracking follows subject; crane vertical arc"],
-    "lighting": ["Lighting: natural outdoor sun; golden hour warm amber; three-point key+fill+back "
-                 "studio; low-key dramatic shadows; high-key bright even"],
-    "continuity": ["Continuity: match eyeline; keep screen direction (180-degree rule); match prop "
-                   "positions; consistent lighting within scene; wardrobe unchanged within scene"],
-    "pacing": ["Short drama pacing: opening sets tone in first 30s; each scene max 3-5 shots; "
-               "climax faster cuts; emotional peaks use close-ups; action uses medium/long with movement"],
+    "shot_type": ["景别:ELS 建立辽阔环境;LS 交代全身与场地;MS 齐腰构图承载对话;"
+                  "CU 面部特写传递情绪;ECU 眼睛/手部极特写强化细节张力"],
+    "camera": ["运镜:static 固定稳定;pan 水平摇;tilt 垂直摇;dolly 推近或拉远;"
+               "zoom 变焦;tracking 跟随主体;crane 升降弧线"],
+    "lighting": ["光线:自然户外日光;黄金时刻暖琥珀色;三点式主光+辅光+轮廓光的棚拍;"
+                 "低调光戏剧性阴影;高调光明亮均匀"],
+    "continuity": ["连贯性:视线方向匹配;保持银幕方向(180 度轴线规则);道具位置匹配;"
+                   "同一场景内光线一致;同一场景内服装不变"],
+    "pacing": ["短剧节奏:开场 30 秒内立住基调;每场戏最多 3-5 个镜头;"
+               "高潮段落加快剪切;情绪峰值用特写;动作段落用中景/全景配合运镜"],
 }
 
 SCREENPLAY_GUIDE: list[str] = [
-    "Each scene should advance plot or reveal character.",
-    "Write natural, character-appropriate dialogue.",
-    "Include clear action lines describing visual elements.",
-    "End with a satisfying resolution; each scene 30-90 seconds when filmed.",
+    "每一场戏都要推进剧情或揭示人物。",
+    "对白自然,符合人物身份与性格。",
+    "动作行要写清可见的画面元素。",
+    "结尾给出令人满意的收束;每场戏拍出来约 30-90 秒。",
 ]
 
 STORYBOARD_GUIDE: list[str] = [
-    "Break scenes into filmable single-clip shots; be specific about action and visual content.",
-    "Opening shot (ELS/LS): establish setting; development (MS/CU): reactions/dialogue; "
-    "climax (CU/ECU, fast): intensity; resolution (LS/MS): aftermath.",
-    "Include which characters appear in each shot.",
+    "把场景拆成可单条拍摄的镜头;动作与画面内容要具体。",
+    "开场镜头(ELS/LS)建立环境;发展段(MS/CU)承载反应与对话;"
+    "高潮段(CU/ECU,节奏快)强化张力;收束段(LS/MS)交代余波。",
+    "标明每个镜头里出现哪些角色。",
 ]

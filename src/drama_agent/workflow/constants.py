@@ -34,8 +34,9 @@ class ReferenceRole(str, Enum):
     REFERENCE_AUDIO = "reference_audio"
 
 
-# 镜头时长边界(秒)。具体时长由模型按剧情节奏决定,代码只兜上限。
+# 镜头时长边界(秒)。具体时长由模型按剧情节奏决定,代码只兜上下限。
 MAX_SHOT_DURATION = 10
+MIN_SHOT_DURATION = 5
 DEFAULT_SHOT_DURATION = 5
 
 

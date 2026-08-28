@@ -5,7 +5,7 @@ import './mocks'
 
 vi.mock('../services/api', () => ({
   episodesApi: { create: vi.fn() },
-  scriptsApi: { list: vi.fn(), create: vi.fn() },
+  scriptsApi: { list: vi.fn() },
   projectsApi: { get: vi.fn() },
   configApi: {
     listModels: vi.fn().mockResolvedValue({
@@ -76,34 +76,49 @@ describe('NewEpisodePage', () => {
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/episodes/ep-new'))
   })
 
-  it('无 completed 剧本时,从剧本库选显示空态、不建集', async () => {
+  it('剧本列表不按作品过滤,散稿也能选到并标注归属', async () => {
+    // 剧本库是全局的:散稿(project_id=null)不属于任何作品。若按 projectId 过滤,
+    // 它对每个作品的「新建一集」都不可见 —— 这条就是那个回归的拦截。
     vi.mocked(scriptsApi.list).mockResolvedValue([
-      { id: 'sc-draft', title: '草稿', genre: 'drama', status: 'created' } as any,
-    ])
+      { ...completedScript, id: 'loose', title: '散稿剧本', project_title: null },
+      { ...completedScript, id: 'owned', title: '归属剧本', project_title: '作品甲' },
+    ] as any)
     renderPage()
-    await waitFor(() => expect(screen.getByText(/暂无可用剧本/)).toBeInTheDocument())
+    await waitFor(() => expect(scriptsApi.list).toHaveBeenCalled())
+    expect(vi.mocked(scriptsApi.list).mock.calls[0][0]).toBeUndefined()
+    await waitFor(() => expect(screen.getByText('散稿剧本（未归属）')).toBeInTheDocument())
+    expect(screen.getByText('归属剧本（作品甲）')).toBeInTheDocument()
+  })
+
+  it('无剧本时,从剧本库选显示空态、不建集', async () => {
+    vi.mocked(scriptsApi.list).mockResolvedValue([])
+    renderPage()
+    await waitFor(() => expect(screen.getByText(/剧本库还没有剧本/)).toBeInTheDocument())
     expect(screen.queryByText('创建视频')).not.toBeInTheDocument()
   })
 
-  it('输入故事:建剧本草稿并跳剧本详情审核', async () => {
-    vi.mocked(scriptsApi.create).mockResolvedValue({ id: 'sc-2', title: '新剧', genre: 'drama', status: 'queued' } as any)
+  it('输入故事:直接建集(带 raw_input),跳剧集详情', async () => {
+    vi.mocked(episodesApi.create).mockResolvedValue({
+      id: 'ep-2', project_id: PROJECT_ID, episode_number: 1, title: '新集',
+      script_id: '', status: 'created', llm_model: 'deepseek-v4-pro',
+      video_provider: 'seedance', video_model: '', resolution: '1080p',
+    } as any)
     renderPage()
-    await waitFor(() => screen.getByText('输入故事'))
-    fireEvent.click(screen.getByText('输入故事'))
-    await waitFor(() => expect(screen.getByText('创作剧本')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText(/给这个剧本起个名字/), { target: { value: '新剧' } })
+    await waitFor(() => screen.getByText('开始制作'))
+    fireEvent.change(screen.getByPlaceholderText('给这一集起个名字'), { target: { value: '新集' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴故事/), { target: { value: '这是一个故事' } })
-    fireEvent.click(screen.getByText('创作剧本'))
-    await waitFor(() => expect(scriptsApi.create).toHaveBeenCalledOnce())
-    const arg = vi.mocked(scriptsApi.create).mock.calls[0][0]
-    expect(arg.title).toBe('新剧')
-    expect(arg.source_text).toBe('这是一个故事')
-    expect(arg.project_id).toBe(PROJECT_ID)
-    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/scripts/sc-2'))
-    expect(episodesApi.create).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('开始制作'))
+    await waitFor(() => expect(episodesApi.create).toHaveBeenCalledOnce())
+    const [pid, data] = vi.mocked(episodesApi.create).mock.calls[0]
+    expect(pid).toBe(PROJECT_ID)
+    expect(data.title).toBe('新集')
+    expect(data.raw_input).toBe('这是一个故事')
+    // 从故事开始不带 script_id(否则会被图当成复用剧本、跳过故事分析)
+    expect(data.script_id).toBeUndefined()
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/episodes/ep-2'))
   })
 
-  it('submits llm_model from the story tab', async () => {
+  it('输入故事 tab 提交后端默认 llm', async () => {
     vi.mocked(configApi.listModels).mockResolvedValue({
       models: [
         { value: 'a', label: 'A', provider: 'P' },
@@ -113,15 +128,14 @@ describe('NewEpisodePage', () => {
     })
     vi.mocked(configApi.listVideoModels).mockResolvedValue({ models: [], default: null })
     vi.mocked(scriptsApi.list).mockResolvedValue([])
-    vi.mocked(scriptsApi.create).mockResolvedValue({ id: 's1' } as any)
+    vi.mocked(episodesApi.create).mockResolvedValue({ id: 'ep-x' } as any)
     renderPage()
-    await waitFor(() => screen.getByText('输入故事'))
-    fireEvent.click(screen.getByText('输入故事'))
-    fireEvent.change(screen.getByPlaceholderText('给这个剧本起个名字'), { target: { value: 'My' } })
+    await waitFor(() => screen.getByText('开始制作'))
+    fireEvent.change(screen.getByPlaceholderText('给这一集起个名字'), { target: { value: 'My' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴故事/), { target: { value: 'text body' } })
-    fireEvent.click(screen.getByText('创作剧本'))
-    await waitFor(() => expect(scriptsApi.create).toHaveBeenCalledWith(
-      expect.objectContaining({ llm_model: 'b' })
+    fireEvent.click(screen.getByText('开始制作'))
+    await waitFor(() => expect(episodesApi.create).toHaveBeenCalledWith(
+      PROJECT_ID, expect.objectContaining({ llm_model: 'b' })
     ))
   })
 

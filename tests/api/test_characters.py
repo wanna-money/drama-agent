@@ -102,7 +102,7 @@ async def test_generate_sheet_returns_four_views(client):
     lid = (await client.post(f"/api/projects/p1/characters/{cid}/looks",
                              json={"name": "日常装"})).json()["id"]
     with patch("drama_agent.api.characters.character_gen_service.generate_four_view_sheet",
-               AsyncMock(return_value=(b"f", b"s", b"b", b"c"))):
+               AsyncMock(return_value=(b"sheet", (b"f", b"s", b"b", b"c")))):
         resp = await client.post(
             f"/api/projects/p1/characters/{cid}/looks/{lid}/generate-sheet",
             json={"model_id": "seedream"})
@@ -110,6 +110,25 @@ async def test_generate_sheet_returns_four_views(client):
     v = resp.json()["views"]
     assert set(v.keys()) == {"front", "side", "back", "face"}
     assert v["face"] == base64.b64encode(b"c").decode()
+
+
+@pytest.mark.asyncio
+async def test_generate_sheet_returns_sheet_for_manual_crop_when_auto_crop_fails(client):
+    """自动裁切失败时生成本身仍算成功:回 200 + views=None + 原图,供前端转人工裁切。
+    若这里改回抛错,用户就得为一次切不开的图重新烧一次文生图 —— 这条拦的是那个回归。"""
+    cid = (await client.post("/api/projects/p1/characters",
+                             json={"name": "林夏"})).json()["id"]
+    lid = (await client.post(f"/api/projects/p1/characters/{cid}/looks",
+                             json={"name": "日常装"})).json()["id"]
+    with patch("drama_agent.api.characters.character_gen_service.generate_four_view_sheet",
+               AsyncMock(return_value=(b"sheet", None))):
+        resp = await client.post(
+            f"/api/projects/p1/characters/{cid}/looks/{lid}/generate-sheet",
+            json={"model_id": "seedream"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["views"] is None
+    assert body["sheet_b64"] == base64.b64encode(b"sheet").decode()
 
 
 @pytest.mark.asyncio
@@ -170,6 +189,44 @@ async def test_import_from_asset_missing_asset_404(client, monkeypatch):
         f"/api/projects/p1/characters/{cid}/looks/{lid}/import-from-asset",
         json={"asset_id": "nope"})
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_import_from_asset_crop_failure_is_422_not_404(client, monkeypatch):
+    """切不开是内容问题 → 422(前端据此引导人工裁切);与"素材不存在"的 404 必须分开。
+    两者混成同一个码,前端就无从判断该弹裁切器还是提示数据缺失。"""
+    import drama_agent.api.characters as chars
+    from drama_agent.services.character_gen_service import CropFailed
+
+    cid = (await client.post("/api/projects/p1/characters",
+                             json={"name": "林夏"})).json()["id"]
+    lid = (await client.post(f"/api/projects/p1/characters/{cid}/looks",
+                             json={"name": "日常装"})).json()["id"]
+    monkeypatch.setattr(chars.character_import_service, "import_asset_as_look_views",
+                        AsyncMock(side_effect=CropFailed("未能自动识别四视图分界")))
+    r = await client.post(
+        f"/api/projects/p1/characters/{cid}/looks/{lid}/import-from-asset",
+        json={"asset_id": "a-1"})
+    assert r.status_code == 422
+    assert "四视图分界" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_import_from_asset_unreadable_image_is_422_not_500(client, monkeypatch):
+    """素材不是图片时 PIL 抛 UnidentifiedImageError —— 必须映射 422,不能裸 500。"""
+    import drama_agent.api.characters as chars
+    from PIL import UnidentifiedImageError
+
+    cid = (await client.post("/api/projects/p1/characters",
+                             json={"name": "林夏"})).json()["id"]
+    lid = (await client.post(f"/api/projects/p1/characters/{cid}/looks",
+                             json={"name": "日常装"})).json()["id"]
+    monkeypatch.setattr(chars.character_import_service, "import_asset_as_look_views",
+                        AsyncMock(side_effect=UnidentifiedImageError("bad")))
+    r = await client.post(
+        f"/api/projects/p1/characters/{cid}/looks/{lid}/import-from-asset",
+        json={"asset_id": "a-1"})
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio

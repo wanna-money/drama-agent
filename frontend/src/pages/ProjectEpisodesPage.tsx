@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Tag, Modal, Toast, List, Typography, Space } from '@douyinfe/semi-ui'
+import { Button, Tag, Modal, Toast, List, Typography, Space, Row, Col } from '@douyinfe/semi-ui'
 import type { TagColor } from '@douyinfe/semi-ui/lib/es/tag'
 import { IconPlus, IconUser } from '@douyinfe/semi-icons'
 import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
+import AdaptationPanel from '../components/AdaptationPanel'
 import { projectsApi, episodesApi, Project, Episode } from '../services/api'
 
 const { Text } = Typography
@@ -87,10 +88,18 @@ export default function ProjectEpisodesPage() {
         <PageEmpty variant="error" title="加载失败" description="无法获取项目详情,请检查网络或后端服务">
           <Button onClick={load}>重试</Button>
         </PageEmpty>
-      ) : episodes.length === 0 ? (
-        <PageEmpty title="还没有剧集" description="点击右上角「新建一集」开始创作第 1 集" />
       ) : (
-        <List dataSource={episodes} renderItem={renderItem} />
+        <Row gutter={[0, 16]}>
+          {/* 是否小说作品由面板自己按后端 adaptation 状态判定,非小说作品它渲染 null */}
+          <Col span={24}><AdaptationPanel projectId={id!} onCommitted={load} /></Col>
+          <Col span={24}>
+            {episodes.length === 0 ? (
+              <PageEmpty title="还没有剧集" description="点击右上角「新建一集」开始创作第 1 集" />
+            ) : (
+              <List dataSource={episodes} renderItem={renderItem} />
+            )}
+          </Col>
+        </Row>
       )}
     </PageShell>
   )

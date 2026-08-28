@@ -11,16 +11,39 @@ from drama_agent.services import episode_service, cost_service
 router = APIRouter(prefix="/api/projects", tags=["episodes"])
 
 
+def _default_llm_model() -> str:
+    """默认文本模型 = provider 注册表的有效默认(is_default 优先,否则首个可用)。
+
+    与 runner._fallback_llm_model / config_api 同源(规范 4):默认模型只有一处权威,
+    不在接口层再写一份字符串。
+    """
+    from drama_agent import provider as provider_pkg
+    dm = provider_pkg.provider_registry.effective_default("llm")
+    return dm.id if dm else ""
+
+
 class CreateEpisodeRequest(BaseModel):
     title: str
-    script_id: str
-    llm_model: str = "deepseek-v4-pro"
+    script_id: str | None = None      # 传了 = 复用剧本;不传 = 从故事开始
+    raw_input: str | None = None      # 从故事开始时的原始故事文本
+    target_seconds: int = 120
+    # 不给模型名写死默认值:默认模型的唯一权威是 provider 注册表的
+    # effective_default("llm")(规范 4)。此处写死会与用户在「模型管理」标的默认模型分叉,
+    # 未传该字段的调用方就会建出跑在别的 provider 上的集。
+    llm_model: str | None = None
     video_provider: str = "seedance"
     video_model: str = ""
     resolution: str = "768P"
     episode_number: int | None = None
     use_keyframes: bool = False
     keyframe_image_model: str = ""
+
+
+class UpdateEpisodeRequest(BaseModel):
+    """开拍前可改的字段。都是可选 —— 只改传了的那些。"""
+    title: str | None = None
+    raw_input: str | None = None
+    target_seconds: int | None = None
 
 
 @router.get("/{project_id}/episodes")
@@ -48,19 +71,64 @@ async def create_episode(
     )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    script = (await db.execute(
-        select(Script).where(Script.id == req.script_id)
-    )).scalar_one_or_none()
-    if not script or script.status != LifecycleStatus.COMPLETED.value:
-        raise HTTPException(status_code=409, detail="Script must be a completed script")
+    script = None
+    if req.script_id:
+        script = (await db.execute(
+            select(Script).where(Script.id == req.script_id)
+        )).scalar_one_or_none()
+        if not script or not (script.content or "").strip():
+            raise HTTPException(status_code=409, detail="源剧本不存在或正文为空")
+    if not req.raw_input and script is None:
+        raise HTTPException(status_code=422, detail="从故事开始需要提供故事内容或源剧本")
     return await episode_service.create(
         db, project_id=project_id, title=req.title, script_id=req.script_id,
-        llm_model=req.llm_model, video_provider=req.video_provider,
+        raw_input=req.raw_input, target_seconds=req.target_seconds,
+        llm_model=req.llm_model or _default_llm_model(),
+        video_provider=req.video_provider,
         video_model=req.video_model, resolution=req.resolution,
         episode_number=req.episode_number,
         use_keyframes=req.use_keyframes,
         keyframe_image_model=req.keyframe_image_model,
     )
+
+
+@router.patch("/{project_id}/episodes/{episode_id}")
+async def update_episode(
+    project_id: str, episode_id: str, req: UpdateEpisodeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """开拍前修改本集(标题/故事内容/目标时长)。
+
+    只允许 created 态改:一旦开拍,故事分析与剧本都由这段原文推导而来,回头改它会让
+    已产出的内容与源头不符。跑起来之后要改内容,走剧本审核的 AI 改写/手动编辑
+    (那条路专为改内容设计,且有版本树)。
+    """
+    ep = (await db.execute(
+        select(Episode).where(Episode.id == episode_id)
+    )).scalar_one_or_none()
+    if not ep or ep.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if ep.status != LifecycleStatus.CREATED.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"已开拍的剧集不能改故事内容（当前状态：{ep.status}）。"
+                   "如需调整内容，请在剧本审核阶段使用 AI 改写或手动编辑。",
+        )
+    if req.title is not None:
+        if not req.title.strip():
+            raise HTTPException(status_code=422, detail="标题不能为空")
+        ep.title = req.title.strip()
+    if req.raw_input is not None:
+        # 从故事开始的集(无源剧本)靠这段原文起跑,清空它会让开拍无输入可用
+        if not req.raw_input.strip() and not ep.script_id:
+            raise HTTPException(status_code=422, detail="故事内容不能为空")
+        ep.raw_input = req.raw_input
+    if req.target_seconds is not None:
+        if req.target_seconds <= 0:
+            raise HTTPException(status_code=422, detail="目标时长须为正数")
+        ep.target_seconds = req.target_seconds
+    await db.commit()
+    return await episode_service.get(db, episode_id)
 
 
 @router.get("/{project_id}/episodes/{episode_id}")

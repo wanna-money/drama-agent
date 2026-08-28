@@ -16,6 +16,16 @@ class Project(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     title: Mapped[str] = mapped_column(String(255))
     genre: Mapped[str] = mapped_column(String(100), default="drama")
+    # 作品级「小说改编 → 分集切分」。见 specs/2026-08-25-novel-adaptation-episode-split-design.md
+    source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 切分依据二选一(接口层校验恰好一个非空)
+    target_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_seconds_per_episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 分集剧本草稿:[{index,title,screenplay}]
+    adapted_draft: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # AdaptationStatus 取值(见 db/enums.py)
+    adaptation_status: Mapped[str] = mapped_column(
+        String(20), default="none", server_default="none")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -35,10 +45,21 @@ class Episode(Base):
     project_id: Mapped[str] = mapped_column(String(36), index=True)
     episode_number: Mapped[int] = mapped_column(Integer, default=1)
     title: Mapped[str] = mapped_column(String(255))
-    # FK→Script(视频总从某 completed Script 产)
-    script_id: Mapped[str] = mapped_column(String(36), index=True)
+    # 复用剧本来源(可空 — 从故事开始时没有源剧本;记下血统但之后互不影响)
+    script_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    # 从故事开始时的原始故事文本(原在 Script.source_text)
+    raw_input: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 目标时长(秒),驱动剧本篇幅与分镜总时长
+    target_seconds: Mapped[int] = mapped_column(Integer, default=120, server_default="120")
+    # AI 改写版本树(从 Script 搬来)
+    screenplay_versions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    screenplay_version_current: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     status: Mapped[str] = mapped_column(String(50), default=LifecycleStatus.CREATED)
-    llm_model: Mapped[str] = mapped_column(String(100), default="deepseek-v4-pro")
+    # 不给硬编码模型名默认值:默认模型的权威是 provider 注册表的 effective_default("llm")
+    # (规范 4),由接口层/runner 解析后写入。空串 = 未指定,runner 起跑时兜底解析。
+    llm_model: Mapped[str] = mapped_column(String(100), default="")
     video_provider: Mapped[str] = mapped_column(String(50), default="seedance")
     video_model: Mapped[str] = mapped_column(String(100), default="")
     resolution: Mapped[str] = mapped_column(String(20), default="768P")
@@ -53,30 +74,17 @@ class Episode(Base):
 
 
 class Script(Base):
-    """全局剧本库的一等实体。project_id 可空(散稿=null;分集产出挂作品)。
-    ScriptGraph 的 thread_id = id;草稿=source_text 有、content 空、status=created。"""
+    """全局剧本库的只读复用素材。没有 graph run —— 只由「某集剧本通过后存入」产生。"""
     __tablename__ = "scripts"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
-    episode_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     genre: Mapped[str] = mapped_column(String(100), default="drama")
     source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     story_analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default=LifecycleStatus.CREATED)
-    llm_model: Mapped[str] = mapped_column(String(100), default="")
-    state_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    screenplay_versions: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    screenplay_version_current: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0"
-    )
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )
 
 
 class VideoArtifact(Base):
@@ -157,17 +165,6 @@ class UsageRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-class CharacterProfile(Base):
-    __tablename__ = "character_profiles"
-    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_character_project_name"),)
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    project_id: Mapped[str] = mapped_column(String(36), index=True)
-    name: Mapped[str] = mapped_column(String(255))
-    appearance: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-
 class CustomProvider(Base):
     """全部 provider(界面管理)。api_key 明文存;列表接口只回掩码。
     内置 provider 由 provider/seed.py 幂等种入(builtin=True,可改凭证/模型但不可删);
@@ -211,13 +208,21 @@ class Asset(Base):
 
 
 class Character(Base):
-    """项目级角色。跨该项目剧集共享;与全局素材库(Asset)解耦。"""
+    """项目级角色 —— 角色身份的**唯一权威**。跨该项目剧集共享;与全局素材库(Asset)解耦。
+
+    description 与 appearance 是两种东西,同一行上的两列(不是两张表):
+      description —— 人手写的备注(外貌/性格/设定,角色页那个输入框)
+      appearance  —— AI 抽出的外貌描述,喂给视频/图片模型
+    两者是同一行上的两列,**不要再拆出按名字关联的第二张表** —— 那样同一角色的描述会
+    两处漂移,且改名后双双失联。
+    """
     __tablename__ = "characters"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    appearance: Mapped[str | None] = mapped_column(Text, nullable=True)
     voice_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

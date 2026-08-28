@@ -19,7 +19,7 @@ def make_base_state(**overrides):
         "prompts_approved": False,
         "prompt_revision_notes": "",
         "videos": [],
-        "character_references": {},
+        "references": [],
         "current_stage": "starting",
         "error": None,
         "llm_model": "deepseek-v4-pro",
@@ -53,83 +53,38 @@ STORY_ANALYSIS = {
 # ── story_analyzer ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_story_analyzer_returns_analysis(monkeypatch):
-    """story_analyzer_node calls LLM and returns structured analysis + persists characters."""
-    import drama_agent.db.session as db_session
-    from drama_agent.db.models import Base
-    from drama_agent.workflow.nodes.story_analyzer import story_analyzer_node
-    from drama_agent.services import character_service
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+async def test_story_analyzer_returns_analysis():
+    """story_analyzer_node calls LLM and returns structured analysis.
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr(db_session, "AsyncSessionLocal", factory)
+    落库(角色身份/外貌)已不在本节点 —— 移到 cast_review 人工确认之后,
+    相应断言见 tests/workflow/test_cast_alignment.py。
+    """
+    from drama_agent.workflow.nodes.story_analyzer import story_analyzer_node
 
     with patch("drama_agent.services.llm_service.llm_service.complete_json",
-               new_callable=AsyncMock, return_value=STORY_ANALYSIS):
+               new_callable=AsyncMock, return_value=STORY_ANALYSIS), \
+         patch("drama_agent.services.character_entity_service.list_characters",
+               new_callable=AsyncMock, return_value=[]):
         result = await story_analyzer_node(make_base_state())
 
     assert result["current_stage"] == "story_analyzed"
     assert result["story_analysis"]["title"] == "Hero's Journey"
     assert result["story_analysis"]["characters"][0]["name"] == "Hero"
-    async with factory() as s:
-        assert await character_service.get(s, "proj-test", "Hero") == \
-            STORY_ANALYSIS["characters"][0]["appearance"]
-    await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_story_analyzer_updates_title(monkeypatch):
+async def test_story_analyzer_updates_title():
     """story_analyzer_node updates title from analysis."""
-    import drama_agent.db.session as db_session
-    from drama_agent.db.models import Base
     from drama_agent.workflow.nodes.story_analyzer import story_analyzer_node
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    monkeypatch.setattr(db_session, "AsyncSessionLocal",
-                        async_sessionmaker(engine, expire_on_commit=False))
 
     analysis = {**STORY_ANALYSIS, "title": "Extracted Title"}
     with patch("drama_agent.services.llm_service.llm_service.complete_json",
-               new_callable=AsyncMock, return_value=analysis):
+               new_callable=AsyncMock, return_value=analysis), \
+         patch("drama_agent.services.character_entity_service.list_characters",
+               new_callable=AsyncMock, return_value=[]):
         result = await story_analyzer_node(make_base_state(title="Original Title"))
 
     assert result["title"] == "Extracted Title"
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_story_analyzer_multiple_characters(monkeypatch):
-    """story_analyzer_node persists all characters."""
-    import drama_agent.db.session as db_session
-    from drama_agent.db.models import Base
-    from drama_agent.workflow.nodes.story_analyzer import story_analyzer_node
-    from drama_agent.services import character_service
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr(db_session, "AsyncSessionLocal", factory)
-
-    analysis = {**STORY_ANALYSIS, "characters": [
-        {"name": "Hero", "appearance": "tall man", "personality": "brave", "reference_image_url": None},
-        {"name": "Villain", "appearance": "dark coat", "personality": "cunning", "reference_image_url": None},
-    ]}
-    with patch("drama_agent.services.llm_service.llm_service.complete_json",
-               new_callable=AsyncMock, return_value=analysis):
-        await story_analyzer_node(make_base_state())
-
-    async with factory() as s:
-        assert await character_service.get(s, "proj-test", "Hero") == "tall man"
-        assert await character_service.get(s, "proj-test", "Villain") == "dark coat"
-    await engine.dispose()
 
 
 # ── screenplay_writer ─────────────────────────────────────────────────────────
@@ -274,6 +229,97 @@ async def test_storyboard_handles_dict_response():
     assert len(result["shots"]) == 2
 
 
+# ── storyboard 总时长收敛(Task 6)────────────────────────────────────────────
+# 收敛逻辑是纯函数,直接测它 —— 绕开节点里 uuid 重发 shot_id 的噪声,锁死真正的契约:
+# 超目标按比例压缩、镜头一个不少、每镜落在 [5,10]、压到下限仍超只标记不砍镜头。
+
+def _dur_shots(n: int, dur: int) -> list[dict]:
+    return [{"shot_id": f"s{i}", "scene_number": 1, "shot_number": i, "shot_type": "MS",
+             "camera_movement": "static", "duration_seconds": dur, "description": "d",
+             "characters": [], "dialogue": "", "action": "a", "location": "L"}
+            for i in range(1, n + 1)]
+
+
+def test_converge_compresses_over_target_and_keeps_every_shot_in_range():
+    """40s 压到 30s:5 镜一个不少,每镜比例压缩后仍落在 [5,10],总和不超目标。"""
+    from drama_agent.workflow.nodes.storyboard_director import _converge_duration
+    shots, over = _converge_duration(_dur_shots(5, 8), 30)
+    assert len(shots) == 5                                       # 不丢镜头
+    assert all(5 <= s["duration_seconds"] <= 10 for s in shots)
+    assert sum(s["duration_seconds"] for s in shots) <= 30
+    assert over is False
+
+
+def test_converge_leaves_in_target_shots_untouched():
+    """总时长已在目标内 → 原样返回。收敛是纠偏,不是无条件重排。"""
+    from drama_agent.workflow.nodes.storyboard_director import _converge_duration
+    original = _dur_shots(4, 5)                                  # 20s ≤ 30s
+    shots, over = _converge_duration(original, 30)
+    assert shots == original
+    assert over is False
+
+
+def test_converge_flags_over_target_without_dropping_when_floor_exceeds():
+    """20 镜压到 5s 下限 = 100s 仍超 60s → 一个都不砍,标记 duration_over_target。
+
+    砍镜头 = 代码替用户做剪辑决策;这里的契约是"宁可超长也不擅自删",超长交人工决策。
+    """
+    from drama_agent.workflow.nodes.storyboard_director import _converge_duration
+    shots, over = _converge_duration(_dur_shots(20, 8), 60)
+    assert len(shots) == 20                                      # 一个不丢
+    assert all(s["duration_seconds"] == 5 for s in shots)        # 全压到下限
+    assert over is True
+
+
+@pytest.mark.asyncio
+async def test_storyboard_node_flags_duration_over_target():
+    """节点级:镜头数过多时 duration_over_target=True,但仍产出全部镜头(不阻断流程)。"""
+    from drama_agent.workflow.nodes.storyboard_director import storyboard_director_node
+    raw = [{**SHOTS_RAW[0], "duration_seconds": 8} for _ in range(20)]
+    with patch("drama_agent.services.llm_service.llm_service.complete_json",
+               new_callable=AsyncMock, return_value=raw):
+        result = await storyboard_director_node(
+            make_base_state(screenplay="s", story_analysis=STORY_ANALYSIS),
+            target_seconds=60,
+        )
+    assert len(result["shots"]) == 20
+    assert result["duration_over_target"] is True
+
+
+@pytest.mark.asyncio
+async def test_storyboard_node_reads_target_seconds_from_state():
+    """未显式传 target 时,节点取 state['target_seconds'](集级目标)据此压缩 ——
+    证明集级目标真的流到了收敛逻辑,而非恒用 config 默认 120。"""
+    from drama_agent.workflow.nodes.storyboard_director import storyboard_director_node
+    raw = [{**SHOTS_RAW[0], "duration_seconds": 8} for _ in range(5)]   # 40s
+    with patch("drama_agent.services.llm_service.llm_service.complete_json",
+               new_callable=AsyncMock, return_value=raw):
+        result = await storyboard_director_node(make_base_state(
+            screenplay="s", story_analysis=STORY_ANALYSIS, target_seconds=30,
+        ))
+    # 用 30 → 压到 ≤30;若误用默认 120 则维持 40s > 30,测试即挂
+    assert sum(s["duration_seconds"] for s in result["shots"]) <= 30
+    assert result["duration_over_target"] is False
+
+
+@pytest.mark.asyncio
+async def test_storyboard_node_passes_revision_notes_to_llm():
+    """分镜被打回重做时,storyboard_revision_notes 必须真正进入 LLM prompt,不能被无视。"""
+    from drama_agent.workflow.nodes.storyboard_director import storyboard_director_node
+    captured: list[str] = []
+
+    async def cap(system, user, **kw):
+        captured.append(user)
+        return SHOTS_RAW
+
+    with patch("drama_agent.services.llm_service.llm_service.complete_json", side_effect=cap):
+        await storyboard_director_node(make_base_state(
+            screenplay="s", story_analysis=STORY_ANALYSIS,
+            storyboard_revision_notes="镜头太碎，合并前两个",
+        ))
+    assert "镜头太碎，合并前两个" in captured[0]
+
+
 # ── prompt_engineer ───────────────────────────────────────────────────────────
 
 def make_shots():
@@ -379,21 +425,27 @@ async def test_prompt_engineer_second_shot_has_frame_chain(pe_db):
 
 
 @pytest.mark.asyncio
-async def test_prompt_engineer_uses_character_reference(pe_db):
-    """prompt_engineer uses character_references for subject_reference."""
+async def test_prompt_engineer_does_not_emit_subject_reference(pe_db):
+    """prompt_engineer 不再从参考图清单取角色主体图 —— 主体参考已收敛到
+    subject_ref_service 一处。若这里又开始下发 subject_reference,同一角色的图
+    会被 prompt_engineer 与 video_generator 各投一次(重复投喂)。"""
     from drama_agent.workflow.nodes.prompt_engineer import prompt_engineer_node
 
     with patch("drama_agent.services.llm_service.llm_service.complete_json",
                new_callable=AsyncMock, return_value={"prompt_text": "shot", "negative_prompt": "bad"}):
         result = await prompt_engineer_node(make_base_state(
             shots=make_shots(),
-            character_references={"Hero": "http://hero-ref.jpg"},
+            references=[
+                {"key": "Hero", "ref_type": "character", "image_url": "http://hero-ref.jpg"},
+                {"key": "Rooftop", "ref_type": "background", "image_url": "http://bg.jpg"},
+            ],
         ))
 
-    # Shot 2 has Hero character and we have a character_reference
-    hero_prompt = result["prompts"][1]
-    assert hero_prompt["reference_image_url"] == "http://hero-ref.jpg"
-    assert hero_prompt["reference_role"] == "subject_reference"
+    roles = [p["reference_role"] for p in result["prompts"]]
+    assert "subject_reference" not in roles
+    # 首帧连贯标记不受影响:第 2 镜起仍标 first_frame
+    assert result["prompts"][1]["reference_role"] == "first_frame"
+    assert all(p["reference_image_url"] is None for p in result["prompts"])
 
 
 @pytest.mark.asyncio
@@ -410,19 +462,11 @@ async def test_prompt_engineer_empty_shots():
 # ── robustness: missing keys in LLM output ────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_story_analyzer_tolerates_missing_character_keys(monkeypatch):
-    """story_analyzer_node should not crash when LLM returns characters without name/appearance."""
-    import drama_agent.db.session as db_session
-    from drama_agent.db.models import Base
+async def test_story_analyzer_tolerates_missing_character_keys():
+    """LLM 返回缺 name/appearance 的角色项时不得崩 —— 脏数据由下游 cast 解析处过滤,
+    这里只保证节点本身把分析结果原样带出去。"""
     from drama_agent.workflow.nodes.story_analyzer import story_analyzer_node
-    from drama_agent.services import character_service
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr(db_session, "AsyncSessionLocal", factory)
+    from drama_agent.services import cast_service
 
     incomplete_analysis = {
         "title": "Broken",
@@ -434,15 +478,14 @@ async def test_story_analyzer_tolerates_missing_character_keys(monkeypatch):
         ],
     }
     with patch("drama_agent.services.llm_service.llm_service.complete_json",
-               new_callable=AsyncMock, return_value=incomplete_analysis):
+               new_callable=AsyncMock, return_value=incomplete_analysis), \
+         patch("drama_agent.services.character_entity_service.list_characters",
+               new_callable=AsyncMock, return_value=[]):
         result = await story_analyzer_node(make_base_state())
 
-    # Only the complete character should be persisted
-    async with factory() as s:
-        assert await character_service.get(s, "proj-test", "Villain") == "dark cloak"
-        assert await character_service.get(s, "proj-test", "Hero") is None
     assert result["current_stage"] == "story_analyzed"
-    await engine.dispose()
+    # 无名条目被丢掉、有名的保留 —— 无名角色进不了阵容(没有身份可确认)
+    assert cast_service.analysis_names(result["story_analysis"]) == ["Hero", "Villain"]
 
 
 @pytest.mark.asyncio

@@ -39,17 +39,22 @@ async def client():
     await test_engine.dispose()
 
 
-async def _seed_episode(*, status: str = "running", stage: str | None = None) -> tuple[str, str]:
-    """建一条 project+script+episode,返回 (project_id, episode_id)。"""
+async def _seed_episode(*, status: str = "running", stage: str | None = None,
+                        with_script: bool = True) -> tuple[str, str]:
+    """建一条 project+episode,返回 (project_id, episode_id)。
+    with_script=True → 复用剧本(from_script);False → 从故事开始(from_story,无 script_id)。"""
     import drama_agent.db.session as db_session
     from drama_agent.db.models import Project, Episode, Script
 
     pid, eid, sid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
     async with db_session.AsyncSessionLocal() as s:
         s.add(Project(id=pid, title="剧", genre="drama"))
-        s.add(Script(id=sid, title="剧", source_text="x", content="正文", status="completed"))
+        if with_script:
+            s.add(Script(id=sid, title="剧", source_text="x", content="正文"))
         s.add(Episode(
-            id=eid, project_id=pid, episode_number=1, title="E", script_id=sid,
+            id=eid, project_id=pid, episode_number=1, title="E",
+            script_id=sid if with_script else None,
+            raw_input=None if with_script else "故事",
             status=status, use_keyframes=False,
             state_snapshot={"current_stage": stage} if stage else None,
         ))
@@ -81,7 +86,7 @@ async def test_status_pipeline_step_cost_maps_stage_to_step(client):
     这是 T6 的关键契约:记账的 node 词表(current_stage)与 step key 词表不同,
     映射错了前端就挂不上成本。多个 stage 落同一步时须相加。
     """
-    _pid, eid = await _seed_episode()
+    _pid, eid = await _seed_episode(with_script=False)  # from_story → 含剧本三步
     agg = {
         "by_node": {
             "story_analyzed": 0.5,          # → step "analysis"
@@ -154,3 +159,63 @@ async def test_provider_model_rejects_bad_cost(client):
     with patch("drama_agent.api.providers._rebuild_safe", AsyncMock()):
         r = await client.post("/api/providers", json=body)
     assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_status_reports_real_duration_summed_from_shots(client):
+    """成片时长必须由后端按镜头求和下发(唯一真相)。
+
+    剧本正文里那种"时长：约8-10分钟"是 LLM 编的;前端也不该自己求和(规范 4)。
+    """
+    import drama_agent.db.session as db_session
+    from drama_agent.db.models import Episode
+    from sqlalchemy import select
+    _pid, eid = await _seed_episode()
+    async with db_session.AsyncSessionLocal() as s:
+        ep = (await s.execute(select(Episode).where(Episode.id == eid))).scalar_one()
+        ep.state_snapshot = {"shots": [
+            {"shot_id": "a", "duration_seconds": 8},
+            {"shot_id": "b", "duration_seconds": 7},
+            {"shot_id": "c"},                        # 缺字段按 0 计,不能炸
+        ]}
+        await s.commit()
+
+    body = (await client.get(f"/api/episodes/{eid}/workflow/status")).json()
+    assert body["total_duration_seconds"] == 15
+
+
+@pytest.mark.asyncio
+async def test_status_duration_is_zero_when_no_shots(client):
+    _pid, eid = await _seed_episode()
+    body = (await client.get(f"/api/episodes/{eid}/workflow/status")).json()
+    assert body["total_duration_seconds"] == 0
+
+
+@pytest.mark.asyncio
+async def test_status_exposes_screenplay_versions_from_episode_columns(client):
+    """剧本版本树存在 Episode 专用列(非 state_snapshot,见 Task 4),status 端点须把它下发 ——
+    剧集页的剧本审核面板据此渲染版本树。漏了则前端版本下拉恒为空。"""
+    import drama_agent.db.session as db_session
+    from drama_agent.db.models import Episode
+    from sqlalchemy import select
+    _pid, eid = await _seed_episode()
+    async with db_session.AsyncSessionLocal() as s:
+        ep = (await s.execute(select(Episode).where(Episode.id == eid))).scalar_one()
+        ep.screenplay_versions = [
+            {"screenplay": "初稿正文", "label": "初稿", "created_at": None},
+            {"screenplay": "改写正文", "label": "AI 改写", "created_at": None},
+        ]
+        ep.screenplay_version_current = 1
+        await s.commit()
+
+    body = (await client.get(f"/api/episodes/{eid}/workflow/status")).json()
+    assert body["screenplay_versions"][0]["label"] == "初稿"
+    assert body["screenplay_version_current"] == 1
+
+
+@pytest.mark.asyncio
+async def test_status_screenplay_versions_default_empty(client):
+    _pid, eid = await _seed_episode()
+    body = (await client.get(f"/api/episodes/{eid}/workflow/status")).json()
+    assert body["screenplay_versions"] == []
+    assert body["screenplay_version_current"] == 0

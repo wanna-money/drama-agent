@@ -2,46 +2,16 @@ import logging
 from dataclasses import asdict
 
 from drama_agent.workflow.state import DramaState, VideoDict
-from drama_agent.workflow.constants import ReferenceRole
 from drama_agent.services.video_service import video_service
-from drama_agent.services.video_refs import RefImage, RefKind, RefAudio, cap_audio_refs
+from drama_agent.services.video_refs import RefImage, RefAudio, cap_audio_refs
 from drama_agent.services.ref_delivery import inline_local_refs
 from drama_agent.services.storage_service import storage_service
 from drama_agent.db.session import AsyncSessionLocal
 from drama_agent.services import artifact_service
+from drama_agent.services import subject_ref_service
 from drama_agent.services import usage_service
 
 logger = logging.getLogger(__name__)
-
-
-async def _subject_refs_for_shot(project_id: str, shot: dict, look_assignments: dict) -> list[RefImage]:
-    """名字-join → 本场景指派 Look(缺省默认)→ 该 Look 各视图 → subject RefImage。
-
-    join 不到 Character / Look 无图 → 空(降级为仅文本一致)。失败不阻断。
-    """
-    from drama_agent.services import character_entity_service as ce
-    scene = str(shot.get("scene_number", 1))
-    refs: list[RefImage] = []
-    for name in shot.get("characters", []):
-        try:
-            ch = await ce.get_character_by_name(project_id, name)
-            if ch is None:
-                continue
-            looks = await ce.list_looks(ch.id)
-            if not looks:
-                continue
-            assigned = (look_assignments.get(scene) or {}).get(name)
-            look = next((lk for lk in looks if lk.id == assigned), None) \
-                or next((lk for lk in looks if getattr(lk, "is_default", False)), looks[0])
-            views = (("front", look.front_key), ("side", look.side_key), ("back", look.back_key))
-            for view, key in views:
-                if key:
-                    refs.append(RefImage(
-                        url=f"/api/characters/view/{key}", kind="subject",
-                        subject_name=name, view=view))
-        except Exception:  # noqa: BLE001 — 单角色解析失败不阻断
-            continue
-    return refs
 
 
 async def _audio_refs_for_shot(project_id: str, shot: dict) -> list[RefAudio]:
@@ -121,20 +91,19 @@ async def video_generator_node(state: DramaState) -> dict:
             edited_neg if edited_neg is not None else prompt.get("negative_prompt", "")
         )
 
-        # 组装 provider 无关的语义参考图:首帧连贯(上一镜末帧)+ 角色 subject 三视图。
+        # 组装 provider 无关的语义参考图:首帧连贯(关键帧/上一镜末帧)+ 角色 subject。
+        # subject 一律走 subject_ref_service(唯一权威),此处不再另起一条取图路径。
         references: list[RefImage] = []
         keyframe_url = prompt.get("keyframe_url")
         prompt_ref = prompt.get("reference_image_url")
-        prompt_role = prompt.get("reference_role")
         if keyframe_url:
             references.append(RefImage(url=keyframe_url, kind="first_frame"))
         elif prompt_ref:
-            kind: RefKind = "subject" if prompt_role == ReferenceRole.SUBJECT_REFERENCE.value else "first_frame"
-            references.append(RefImage(url=prompt_ref, kind=kind))
+            references.append(RefImage(url=prompt_ref, kind="first_frame"))
         elif last_frame_url:
             references.append(RefImage(url=last_frame_url, kind="first_frame"))
-        references.extend(
-            await _subject_refs_for_shot(project_id, shot, state.get("look_assignments") or {}))
+        references.extend(await subject_ref_service.subject_refs(
+            project_id, shot, state.get("look_assignments") or {}))
 
         audio_refs = await _resolve_audio_refs(provider_name, project_id, shot, references)
         # 送达:本地图/音 ref → data URI(顺带修 subject 相对 URL 外部取不到的隐患)。

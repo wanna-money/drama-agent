@@ -34,6 +34,16 @@ vi.mock('@douyinfe/semi-ui', () => ({
     }
   ),
   Spin: () => <div data-testid="spin" />,
+  // 真实 Cropper 通过 ref 暴露 getCropperCanvas();测试替身按同一契约返回一个
+  // toDataURL 可用的 canvas,否则调用方拿不到裁切结果。
+  Cropper: React.forwardRef(({ src }: any, ref: any) => {
+    React.useImperativeHandle(ref, () => ({
+      getCropperCanvas: () => ({
+        toDataURL: () => `data:image/png;base64,CROP(${src})`,
+      }),
+    }))
+    return <div data-testid="cropper" data-src={src} />
+  }),
   Switch: ({ checked, onChange }: any) => (
     <input type="checkbox" checked={!!checked} onChange={e => onChange?.(e.target.checked)} />
   ),
@@ -111,8 +121,19 @@ vi.mock('@douyinfe/semi-ui', () => ({
     )
   },
   Steps: Object.assign(
-    ({ children }: any) => <div data-testid="steps">{children}</div>,
-    { Step: ({ title, status }: any) => <div data-testid="step" data-status={status || 'wait'}>{title}</div> }
+    // 真实 Semi:点某一步触发 Steps 的 onChange(index);Step 自身接 onClick。
+    ({ children, onChange }: any) => (
+      <div data-testid="steps">
+        {React.Children.map(children, (child: any, i: number) =>
+          React.isValidElement(child)
+            ? React.cloneElement(child as any, { onClick: () => onChange?.(i) })
+            : child
+        )}
+      </div>
+    ),
+    { Step: ({ title, status, onClick }: any) => (
+      <div data-testid="step" data-status={status || 'wait'} onClick={onClick}>{title}</div>
+    ) }
   ),
   Typography: {
     Title: ({ children }: any) => <h1>{children}</h1>,
@@ -244,6 +265,28 @@ vi.mock('@douyinfe/semi-ui', () => ({
     }
     const FormInput = Field('input')
     const FormTextArea = Field('textarea')
+    // 与真实 Semi 一致:Form.InputNumber 有值时写进表单 store 的是 number,
+    // 清空时是空字符串 ''(见 semi-foundation/inputNumber/foundation.js 的 notifyChange:
+    // value == null || value === '' 一律回调 ''),不是 undefined。
+    const FormInputNumber: any = ({ field, label, placeholder, rules, initValue, onChange }: any) => {
+      const c = useCtx()
+      React.useEffect(() => { c?.register(field, rules, initValue) }, [])
+      return (
+        <div>
+          {label && <label>{label}</label>}
+          <input
+            type="number"
+            placeholder={placeholder}
+            defaultValue={c?.store.current[field] ?? ''}
+            onChange={(e) => {
+              const v = e.target.value === '' ? '' : Number(e.target.value)
+              c?.change(field, v); onChange?.(v)
+            }}
+          />
+          {c?.errs[field] && <div role="alert">{c.errs[field]}</div>}
+        </div>
+      )
+    }
     const FormSelect: any = ({ field, label, children, rules, onChange }: any) => {
       const c = useCtx()
       React.useEffect(() => { c?.register(field, rules) }, [])
@@ -275,7 +318,8 @@ vi.mock('@douyinfe/semi-ui', () => ({
       )
     }
     return Object.assign(FormMock, {
-      Input: FormInput, TextArea: FormTextArea, Select: FormSelect, Switch: FormSwitch,
+      Input: FormInput, TextArea: FormTextArea, InputNumber: FormInputNumber,
+      Select: FormSelect, Switch: FormSwitch,
     })
   })(),
   Upload: ({ children, accept, beforeUpload }: any) => (

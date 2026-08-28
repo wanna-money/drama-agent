@@ -5,10 +5,10 @@ from drama_agent.workflow.state import DramaState, ShotDict, PromptDict, VideoDi
 def test_drama_state_keys():
     """DramaState TypedDict should have all required keys."""
     required_keys = [
-        "project_id", "title", "raw_input", "genre",
+        "project_id", "title", "raw_input", "genre", "script_id",
         "story_analysis", "screenplay", "screenplay_approved",
         "shots", "prompts", "prompts_approved",
-        "videos", "character_references",
+        "videos", "references",
         "current_stage", "error", "llm_model", "video_model", "video_provider",
     ]
     annotations = DramaState.__annotations__

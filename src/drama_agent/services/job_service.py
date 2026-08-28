@@ -37,7 +37,12 @@ async def enqueue(
     )).scalar_one_or_none()
     if existing is not None:
         if existing.status in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
-            return _to_dict(existing)  # 非终态:真去重,防同一 resume 被重复处理
+            # 非终态:真去重,防同一 resume 被重复处理。
+            # 仍要 commit —— 本函数三条返回路径的事务边界必须一致:调用方(如 /adapt)
+            # 会在调 enqueue 前把业务状态改脏、指望这里一并落库。唯独这条路径不提交的话,
+            # 那份脏写会随 get_db 出栈被丢弃 → 「响应说 adapting、DB 没变」。
+            await session.commit()
+            return _to_dict(existing)
         # 终态(succeeded/failed):重新武装该行 → 允许"审核打回后的新决策"重新入队。
         # job 是运行时编排记录(非审计日志,审计走 events),复用行以满足 UNIQUE(episode,kind,dedup_key)。
         existing.status = JobStatus.QUEUED.value

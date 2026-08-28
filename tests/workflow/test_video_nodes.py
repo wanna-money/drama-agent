@@ -27,7 +27,7 @@ def make_state_with_prompts(tmp_path):
         "story_analysis": None, "screenplay": "", "screenplay_approved": True,
         "screenplay_revision_notes": "", "shots": shots, "prompts": prompts,
         "prompts_approved": True, "prompt_revision_notes": "", "videos": [],
-        "character_references": {}, "current_stage": "prompts_approved",
+        "references": [], "current_stage": "prompts_approved",
         "error": None, "llm_model": "test", "video_model": "", "video_provider": "seedance",
         "assembled_video_path": None,
         "_tmp_path": tmp_path,

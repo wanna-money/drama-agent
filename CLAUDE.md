@@ -104,6 +104,11 @@ START → story_analyzer → screenplay_writer → screenplay_review[interrupt]
    - 只有 Semi 确实无对应组件的场景(如自绘视频播放器 `<video>`、代码/剧本块 `<pre>`)才用最小 `<div>`/`<pre>`,且其上也不写自定义颜色/尺寸 style,交给浏览器/Semi 默认。
    - **尽可能组件化,公共功能抽成公共组件,优先复用已有组件**。页面/功能里重复出现的结构(页面外壳、页头、空/加载/错误态、列表项、卡片布局、表单片段……)抽到 `frontend/src/components/` 复用,不在各页各写一遍。写新页/新功能前先翻 `components/` 有没有可复用的;有就用、不够就扩它,而不是另起一套。已有的公共组件:`components/PageShell.tsx`——`PageShell`(全宽页面外壳 + 统一页头 `title`/`description`/`headerExtra`)、`PageEmpty`(带插画的居中空/错误态,`variant="empty"|"error"`)、`PageLoading`(居中加载)。**所有列表/详情页的顶层容器统一用 `PageShell`**(详情页自带标题行时不传 `title`,只借外层容器统一全宽/间距);空/加载/错误态统一用 `PageEmpty`/`PageLoading`,不再各页手写 `div+flex` 或裸 `Empty`/`Spin`。公共组件本身也严格遵守本规范(全 Semi 原生、零内联 style)。
    - Semi 组件 API **一律以官方站 https://semi.design/zh-CN 为准**(对应组件页如 Modal→`/show/modal`、Table→`/show/table`、Space→`/spacing/space`、Form→`/input/form`),不确定的先查官方文档再用,别猜 prop。**不要依赖 context7 返回的 Semi 文档**(可能过时/不准)。
+9. **注释写意图与约束,不写变更历史与踩坑记录**。注释要回答"为什么必须这么做"(意图)和"为什么不能改成别的样子"(约束),而不是"这行代码曾经错在哪、是哪个 bug 修出来的"。变更来龙去脉属于 commit message,不该长驻源码 —— 读代码的人看到它只会困惑"现在还有这个问题吗",而且它会随代码演进腐烂成误导。
+   - **禁止**:"此处曾硬编码 X,与 Y 对不上会导致 401"、"用户反馈的『某某脱钩』就源于此"、"(已踩过一次)"、"旧实现在这里 auto-provision,是割裂的源头"、"上一轮为打通 X 加的逻辑现在多余了"。这些都是往事。
+   - **保留**:把踩过的坑改写成**面向未来的约束**。不写"空清单中断会卡死(踩过一次)",写"无待确认项时不得中断:前端只在 cast_pending 非空时渲染确认面板,空清单中断会停在没有 resume 入口的状态上"。前者是记录,后者能阻止下一个人改回去。
+   - **不写行为复述**。`# 取角色列表` 之于 `list_characters(...)` 是噪音。代码已说明"做什么"时,注释只补"为什么"。
+   - 判据:把注释里的过去时句子删掉后,如果下一个改这段代码的人仍然知道**不能怎么改**,那条注释就是合格的;如果只剩"曾经出过 bug"这类信息,删掉它。
 
 ## 单测规范(本仓库约定)
 

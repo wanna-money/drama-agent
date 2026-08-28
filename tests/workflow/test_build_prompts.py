@@ -132,3 +132,90 @@ def test_storyboard_build_prompt_includes_knowledge_guide():
     for t in ShotType:
         assert t.value in user
 
+
+# ── 输出语言:共享规则必须覆盖所有 LLM 节点(#6/#7 的回归拦截) ──────────
+def test_every_llm_node_system_prompt_carries_output_language_rule():
+    """所有 LLM 节点的 SYSTEM 都必须带上共享的输出语言规则。
+
+    这条规则原先靠各节点手抄一句中文,4 个节点只有 2 个抄到 —— 分镜与视频 prompt
+    因此长期输出英文。收敛成共享常量后,这个测试保证新增/改动节点不会再漏掉。
+    """
+    from drama_agent.workflow.prompt_rules import OUTPUT_LANGUAGE_RULE
+    from drama_agent.workflow.nodes import (
+        story_analyzer, screenplay_writer, storyboard_director, prompt_engineer,
+    )
+    for mod in (story_analyzer, screenplay_writer, storyboard_director, prompt_engineer):
+        assert OUTPUT_LANGUAGE_RULE in mod.SYSTEM, f"{mod.__name__} 缺少输出语言规则"
+
+
+def test_screenplay_revision_node_carries_output_language_rule():
+    """剧本"退回修改"节点也要带规则 —— 漏掉会把已通过的中文剧本改成英文再喂给分镜。"""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from drama_agent.workflow.graph import screenplay_revision_node
+    from drama_agent.workflow.prompt_rules import OUTPUT_LANGUAGE_RULE
+
+    fake = AsyncMock(return_value="修改后的剧本")
+    with patch("drama_agent.services.llm_service.llm_service.complete", fake):
+        asyncio.run(screenplay_revision_node({
+            "screenplay": "原剧本", "screenplay_revision_notes": "改开头", "llm_model": "m",
+        }))
+    system = fake.await_args.args[0]
+    assert OUTPUT_LANGUAGE_RULE in system
+
+
+def test_storyboard_few_shot_example_is_chinese_but_keeps_enum_tokens_english():
+    """few-shot 示例得是中文(模型会照抄示例语言),但 shot_type/camera_movement 必须留英文枚举
+    —— 它们要过 _coerce_enum,翻译了就会全部落到默认值。"""
+    from drama_agent.workflow.nodes.storyboard_director import build_prompt
+    from drama_agent.workflow.constants import ShotType, CameraMovement
+    _, user = build_prompt("INT. X - DAY", {})
+    assert "COFFEE SHOP" not in user            # 旧英文示例已替掉
+    assert '"location": "内景 咖啡馆 - 日"' in user
+    assert f'"shot_type": "{ShotType.ELS.value}"' in user
+    assert f'"camera_movement": "{CameraMovement.STATIC.value}"' in user
+
+
+def test_prompt_engineer_does_not_delegate_language_choice_to_model():
+    """无模型专属指引时的兜底文案不能再把语言选择交还给模型(旧文案:
+    "in the language that model expects"),否则和强制中文规则直接打架。"""
+    from drama_agent.workflow.nodes.prompt_engineer import build_prompt
+    shot = {
+        "shot_type": "CU", "camera_movement": "static", "duration_seconds": 5,
+        "location": "内景 房间", "description": "一张脸", "action": "微笑",
+        "dialogue": "", "characters": [],
+    }
+    _, user = build_prompt(
+        shot, char_descriptions=[], templates=[], cin_rules=[], provider="seedance",
+        guides=None,
+    )
+    assert "language that model expects" not in user
+
+
+# ── 目标时长驱动篇幅,且禁止 LLM 自编时长表头(#9) ───────────────────────
+def test_screenplay_prompt_carries_target_duration_and_forbids_invented_header():
+    """剧本 prompt 必须给出目标时长(否则 LLM 自由发挥),并明确禁止输出"时长：约N分钟"
+    这类表头元信息 —— 那个数字既没依据、也和实际出片长度无关。"""
+    from drama_agent.workflow.nodes.screenplay_writer import build_prompt
+    _, user = build_prompt({"title": "T", "characters": []}, target_seconds=90)
+    assert "90 秒" in user
+    assert "1 分 30 秒" in user
+    assert "不要" in user and "元信息表头" in user
+
+
+def test_storyboard_prompt_constrains_total_shot_duration_to_target():
+    """分镜 prompt 要把镜头总时长约束到目标时长,否则会出 37 个镜头这种失控篇幅。"""
+    from drama_agent.workflow.nodes.storyboard_director import build_prompt
+    _, user = build_prompt("INT. X - DAY", {}, target_seconds=100)
+    assert "100 秒" in user
+    assert "duration_seconds" in user
+
+
+def test_both_nodes_default_target_duration_to_config():
+    """不显式传时,两个节点都该落到 config 的 target_episode_seconds(单一默认来源)。"""
+    from drama_agent.config import settings
+    from drama_agent.workflow.nodes.screenplay_writer import build_prompt as sp
+    from drama_agent.workflow.nodes.storyboard_director import build_prompt as sb
+    marker = f"{settings.target_episode_seconds} 秒"
+    assert marker in sp({"title": "T", "characters": []})[1]
+    assert marker in sb("INT. X - DAY", {})[1]

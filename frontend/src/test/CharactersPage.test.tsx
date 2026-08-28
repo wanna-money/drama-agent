@@ -104,6 +104,7 @@ describe('CharactersPage', () => {
     vi.mocked(charactersApi.list).mockResolvedValue([character])
     vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
     vi.mocked(charactersApi.generateSheet).mockResolvedValue({
+      sheet_b64: 'U0hFRVQ=',
       views: { front: 'RkZG', side: 'U1NT', back: 'QkJC', face: 'Q0ND' },
     })
     vi.mocked(charactersApi.saveGeneratedViews).mockResolvedValue(look)
@@ -134,6 +135,7 @@ describe('CharactersPage', () => {
     vi.mocked(charactersApi.list).mockResolvedValue([character])
     vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
     vi.mocked(charactersApi.generateSheet).mockResolvedValue({
+      sheet_b64: 'U0hFRVQ=',
       views: { front: 'F', side: 'S', back: 'B', face: 'C' },
     })
     vi.mocked(charactersApi.saveGeneratedViews).mockResolvedValue(look)
@@ -207,6 +209,96 @@ describe('CharactersPage', () => {
     await waitFor(() => expect(charactersApi.importFromAsset).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), expect.anything(), 'as-1'
     ))
+  })
+
+  // ── 人工裁切(自动识别留白分界失败时的出口) ────────────────────────────────
+
+  it('生成后自动裁切失败(views=null)转人工裁切,不让用户重烧一次生成', async () => {
+    vi.mocked(charactersApi.list).mockResolvedValue([character])
+    vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
+    vi.mocked(charactersApi.generateSheet).mockResolvedValue({
+      sheet_b64: 'U0hFRVQ=', views: null,
+    })
+    render(<CharactersPage />)
+    await waitFor(() => screen.getByText('日常装'))
+
+    fireEvent.click(screen.getByText('AI 生成四视图'))
+    await waitFor(() => expect(configApi.listImageModels).toHaveBeenCalled())
+    fireEvent.click(screen.getByText('生成'))
+
+    // 裁切器打开、底图是后端回传的 sheet 原图(而不是报错把生成结果丢掉)
+    await waitFor(() => expect(screen.getByTestId('cropper')).toBeInTheDocument())
+    expect(screen.getByTestId('cropper')).toHaveAttribute(
+      'data-src', 'data:image/png;base64,U0hFRVQ=')
+    expect(Toast.warning).toHaveBeenCalled()
+  })
+
+  it('人工裁切四张后落库,复用 views-from-generated 端点', async () => {
+    vi.mocked(charactersApi.list).mockResolvedValue([character])
+    vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
+    vi.mocked(charactersApi.generateSheet).mockResolvedValue({
+      sheet_b64: 'U0hFRVQ=', views: null,
+    })
+    vi.mocked(charactersApi.saveGeneratedViews).mockResolvedValue(look)
+    render(<CharactersPage />)
+    await waitFor(() => screen.getByText('日常装'))
+    fireEvent.click(screen.getByText('AI 生成四视图'))
+    await waitFor(() => expect(configApi.listImageModels).toHaveBeenCalled())
+    fireEvent.click(screen.getByText('生成'))
+    await waitFor(() => expect(screen.getByTestId('cropper')).toBeInTheDocument())
+
+    // 逐张确认:正面 → 侧面 → 背面 → 面部特写(最后一步才提交)
+    fireEvent.click(screen.getByText('确认正面，下一张'))
+    fireEvent.click(screen.getByText('确认侧面，下一张'))
+    fireEvent.click(screen.getByText('确认背面，下一张'))
+    expect(charactersApi.saveGeneratedViews).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('完成并保存'))
+
+    const expected = 'CROP(data:image/png;base64,U0hFRVQ=)'
+    await waitFor(() => expect(charactersApi.saveGeneratedViews).toHaveBeenCalledWith(
+      'p-1', 'c-1', 'l-1',
+      { front_b64: expected, side_b64: expected, back_b64: expected, face_b64: expected }
+    ))
+    expect(Toast.success).toHaveBeenCalledWith('已保存四视图')
+  })
+
+  it('从素材库导入收到 422(切不开)转人工裁切,用素材原图当底图', async () => {
+    vi.mocked(charactersApi.list).mockResolvedValue([character])
+    vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
+    vi.mocked(assetsApi.list).mockResolvedValue([
+      { id: 'as-1', category: 'character', name: '林夏预设', description: '', url: '/assets/x.png', size_bytes: 1 },
+    ] as any)
+    vi.mocked(charactersApi.importFromAsset).mockRejectedValue({
+      response: { status: 422, data: { detail: '未能自动识别四视图分界' } },
+    })
+    render(<CharactersPage />)
+    await waitFor(() => screen.getByText('日常装'))
+
+    fireEvent.click(screen.getByText('从素材库导入'))
+    await waitFor(() => expect(screen.getByText('林夏预设')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('选它'))
+
+    await waitFor(() => expect(screen.getByTestId('cropper')).toBeInTheDocument())
+    expect(screen.getByTestId('cropper')).toHaveAttribute('data-src', '/assets/x.png')
+  })
+
+  it('从素材库导入的 404(素材不存在)只报错,不弹裁切器', async () => {
+    vi.mocked(charactersApi.list).mockResolvedValue([character])
+    vi.mocked(charactersApi.listLooks).mockResolvedValue([look])
+    vi.mocked(assetsApi.list).mockResolvedValue([
+      { id: 'as-1', category: 'character', name: '林夏预设', description: '', url: '/x', size_bytes: 1 },
+    ] as any)
+    vi.mocked(charactersApi.importFromAsset).mockRejectedValue({
+      response: { status: 404, data: { detail: '素材不存在' } },
+    })
+    render(<CharactersPage />)
+    await waitFor(() => screen.getByText('日常装'))
+    fireEvent.click(screen.getByText('从素材库导入'))
+    await waitFor(() => expect(screen.getByText('林夏预设')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('选它'))
+
+    await waitFor(() => expect(Toast.error).toHaveBeenCalledWith('导入失败: 素材不存在'))
+    expect(screen.queryByTestId('cropper')).not.toBeInTheDocument()
   })
 
   it('shows breadcrumb 作品列表 › 项目名 › 角色', async () => {

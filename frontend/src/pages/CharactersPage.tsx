@@ -12,6 +12,7 @@ import {
 } from '../services/api'
 import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
 import PreviewImage from '../components/PreviewImage'
+import FourViewCropper from '../components/FourViewCropper'
 
 const { Text } = Typography
 
@@ -60,11 +61,17 @@ export default function CharactersPage() {
   const [genCharDesc, setGenCharDesc] = useState('')
   const [genLookDesc, setGenLookDesc] = useState('')
   const [genViews, setGenViews] = useState<Record<CharacterViewName, string> | null>(null)
+  const [genSheet, setGenSheet] = useState<string>('')
   const [genBusy, setGenBusy] = useState(false)
 
   const [importTarget, setImportTarget] = useState<{ character: Character; look: Look } | null>(null)
   const [charAssets, setCharAssets] = useState<Asset[]>([])
   const [importing, setImporting] = useState(false)
+  // 人工裁切:自动识别留白分界失败(或用户主动想改切法)时的出口。
+  // target 记住要落到哪个 Look,src 是待裁的整张 sheet。
+  const [cropState, setCropState] = useState<
+    { character: Character; look: Look; src: string } | null>(null)
+  const [cropSaving, setCropSaving] = useState(false)
   const [pv, setPv] = useState<{ srcs: string[]; index: number; visible: boolean }>(
     { srcs: [], index: 0, visible: false })
 
@@ -210,11 +217,41 @@ export default function CharactersPage() {
         character_desc: genCharDesc.trim() || undefined,
         look_desc: genLookDesc.trim() || undefined,
       })
+      setGenSheet(r.sheet_b64)
       setGenViews(r.views)
+      // views 为 null = 后端自动识别留白分界失败(生成本身成功)。直接转人工裁切,
+      // 不让用户为一张切不开的图重新烧一次生成。
+      if (r.views === null) {
+        setGenOpen(false)
+        setCropState({
+          character: genTarget.character, look: genTarget.look,
+          src: `data:image/png;base64,${r.sheet_b64}`,
+        })
+        Toast.warning('未能自动识别四视图分界，请手动裁切')
+      }
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } }
       Toast.error('生成失败: ' + (err?.response?.data?.detail || '请稍后重试'))
     } finally { setGenBusy(false) }
+  }
+
+  /** 人工裁切结果落库,复用既有 views-from-generated 端点(与 AI 生成保存同一条路)。 */
+  const saveCropped = async (views: Record<CharacterViewName, string>) => {
+    if (!projectId || !cropState) return
+    setCropSaving(true)
+    try {
+      await charactersApi.saveGeneratedViews(projectId, cropState.character.id, cropState.look.id, {
+        front_b64: views.front, side_b64: views.side,
+        back_b64: views.back, face_b64: views.face,
+      })
+      Toast.success('已保存四视图')
+      const cid = cropState.character.id
+      setCropState(null)
+      loadLooks(cid)
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      Toast.error('保存失败: ' + (err?.response?.data?.detail || '请重试'))
+    } finally { setCropSaving(false) }
   }
 
   const saveGenerated = async () => {
@@ -239,16 +276,24 @@ export default function CharactersPage() {
     assetsApi.list('character').then(setCharAssets).catch(() => setCharAssets([]))
   }
 
-  const doImport = async (assetId: string) => {
+  const doImport = async (asset: Asset) => {
     if (!projectId || !importTarget) return
     setImporting(true)
     try {
-      await charactersApi.importFromAsset(projectId, importTarget.character.id, importTarget.look.id, assetId)
+      await charactersApi.importFromAsset(projectId, importTarget.character.id, importTarget.look.id, asset.id)
       Toast.success('已从素材库导入四视图')
       setImportTarget(null)
       loadLooks(importTarget.character.id)
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
+      const err = e as { response?: { status?: number; data?: { detail?: string } } }
+      // 422 = 图切不开/不是图片(内容问题),不是数据缺失 → 转人工裁切,用素材原图当底图
+      if (err?.response?.status === 422) {
+        const { character, look } = importTarget
+        setImportTarget(null)
+        setCropState({ character, look, src: asset.url })
+        Toast.warning(err.response?.data?.detail || '未能自动识别四视图分界，请手动裁切')
+        return
+      }
       Toast.error('导入失败: ' + (err?.response?.data?.detail || '请重试'))
     } finally { setImporting(false) }
   }
@@ -430,6 +475,16 @@ export default function CharactersPage() {
           genViews ? (
             <Space>
               <Button onClick={() => setGenViews(null)}>重新生成</Button>
+              {/* 自动裁切成功也允许改切法 —— 留白检测切对了但切得不合意时的出口 */}
+              {genSheet && genTarget && (
+                <Button onClick={() => {
+                  setGenOpen(false)
+                  setCropState({
+                    character: genTarget.character, look: genTarget.look,
+                    src: `data:image/png;base64,${genSheet}`,
+                  })
+                }}>手动裁切</Button>
+              )}
               <Button type="primary" theme="solid" loading={genBusy} onClick={saveGenerated}>保存</Button>
             </Space>
           ) : (
@@ -490,12 +545,20 @@ export default function CharactersPage() {
               <List.Item
                 header={<PreviewImage src={a.url} alt={a.name} height={64} />}
                 main={<Text>{a.name}</Text>}
-                extra={<Button loading={importing} onClick={() => doImport(a.id)}>选它</Button>}
+                extra={<Button loading={importing} onClick={() => doImport(a)}>选它</Button>}
               />
             )}
           />
         )}
       </Modal>
+
+      <FourViewCropper
+        visible={!!cropState}
+        src={cropState?.src ?? ''}
+        saving={cropSaving}
+        onCancel={() => setCropState(null)}
+        onDone={saveCropped}
+      />
 
       <ImagePreview
         src={pv.srcs}

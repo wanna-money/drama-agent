@@ -1,46 +1,71 @@
+"""图入口分流的输入面:`_build_initial_state` 必须和 `graph.route_entry` 用同一判据。
+
+两者一旦分叉就是静默事故:复用剧本的集被当成"从故事开始"重新分析一遍(白烧 LLM、
+还会把已审核的正文冲掉),或反过来,从零起的集带着 screenplay_approved=True 跳过写作。
+"""
+import uuid
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from drama_agent.db import session as db_session
+from drama_agent.db.enums import LifecycleStatus
+from drama_agent.db.models import Base, Episode, Script
+
+
+@pytest.fixture
+async def mem_session(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as c:
+        await c.run_sync(Base.metadata.create_all)
+    Local = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(db_session, "AsyncSessionLocal", Local)
+    yield Local
+    await engine.dispose()
+
+
+async def _mk_episode(Local, *, script_id: str) -> str:
+    eid = str(uuid.uuid4())
+    async with Local() as s:
+        s.add(Episode(id=eid, project_id="p1", episode_number=1, title="T",
+                      script_id=script_id, status=LifecycleStatus.QUEUED.value))
+        await s.commit()
+    return eid
 
 
 @pytest.mark.asyncio
-async def test_script_job_runs_script_graph_and_writes_script():
-    import drama_agent.workflow.runner as r
-    import drama_agent.db.session as db_session
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from drama_agent.db.models import Base, Script
-    import uuid
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as c:
-        await c.run_sync(Base.metadata.create_all)
-    orig = db_session.AsyncSessionLocal
-    db_session.AsyncSessionLocal = async_sessionmaker(eng, expire_on_commit=False)
+async def test_reused_script_state_matches_storyboard_entry(mem_session):
+    """有 script_id:带上剧本正文/分析、已审核,且 route_entry 判为直达分镜。"""
+    from drama_agent.workflow.graph import route_entry
+    from drama_agent.workflow.runner import _build_initial_state
+
     sid = str(uuid.uuid4())
-    async with db_session.AsyncSessionLocal() as s:
-        s.add(Script(id=sid, title="T", source_text="故事", status="queued"))
+    async with mem_session() as s:
+        s.add(Script(id=sid, project_id="p1", title="T", genre="romance",
+                     source_text="原始故事", content="剧本正文",
+                     story_analysis={"genre": "thriller"}))
         await s.commit()
+    eid = await _mk_episode(mem_session, script_id=sid)
 
-    fake = MagicMock()
+    state = await _build_initial_state(eid)
+    assert state["script_id"] == sid
+    assert state["screenplay"] == "剧本正文"
+    assert state["screenplay_approved"] is True
+    assert state["story_analysis"] == {"genre": "thriller"}
+    assert state["genre"] == "thriller"        # 分析里的类型优先于剧本上的
+    assert route_entry(state) == "storyboard_director"
 
-    async def _astream(*a, **k):
-        yield {
-            "story_analysis": {"x": 1}, "screenplay": "剧本正文",
-            "current_stage": "screenplay_written",
-        }
 
-    fake.astream = _astream
-    st = MagicMock()
-    st.next = ()
-    st.values = {"story_analysis": {"x": 1}, "screenplay": "剧本正文"}
-    fake.aget_state = AsyncMock(return_value=st)
+@pytest.mark.asyncio
+async def test_no_script_state_matches_story_entry(mem_session):
+    """无 script_id:正文空、未审核,且 route_entry 判为从故事分析开始。"""
+    from drama_agent.workflow.graph import route_entry
+    from drama_agent.workflow.runner import _build_initial_state
 
-    from drama_agent.db.enums import JobKind
-    # append_event 不 mock:它是 _persist 里 flush 的 status 变更的唯一提交者(同事务设计)
-    with patch.object(r, "get_script_graph", AsyncMock(return_value=fake)):
-        await r.run_job({"episode_id": sid, "kind": JobKind.SCRIPT_START.value,
-                         "project_id": "", "payload_json": None})
-    async with db_session.AsyncSessionLocal() as s:
-        row = await s.get(Script, sid)
-    assert row.content == "剧本正文" and row.story_analysis == {"x": 1}
-    assert row.status == "completed"
-    db_session.AsyncSessionLocal = orig
-    await eng.dispose()
+    eid = await _mk_episode(mem_session, script_id="")
+
+    state = await _build_initial_state(eid)
+    assert state["screenplay"] == ""
+    assert state["screenplay_approved"] is False
+    assert state["story_analysis"] is None
+    assert route_entry(state) == "story_analyzer"

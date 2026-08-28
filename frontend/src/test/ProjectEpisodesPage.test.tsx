@@ -6,6 +6,7 @@ import './mocks'
 vi.mock('../services/api', () => ({
   projectsApi: { get: vi.fn() },
   episodesApi: { delete: vi.fn() },
+  adaptationApi: { start: vi.fn(), get: vi.fn(), saveDraft: vi.fn(), commit: vi.fn() },
 }))
 
 const mockNavigate = vi.fn()
@@ -15,7 +16,7 @@ vi.mock('react-router-dom', async () => {
 })
 
 import ProjectEpisodesPage from '../pages/ProjectEpisodesPage'
-import { projectsApi } from '../services/api'
+import { projectsApi, adaptationApi } from '../services/api'
 
 const PROJECT_ID = 'proj-1'
 const renderPage = () =>
@@ -33,7 +34,13 @@ const projectWith = (episodes: any[]) => ({
 })
 
 describe('ProjectEpisodesPage', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // 默认非小说作品:改编面板自行判定后不渲染,不影响既有断言。
+    vi.mocked(adaptationApi.get).mockResolvedValue({
+      adaptation_status: 'none', adapted_draft: [], source_text: '',
+    })
+  })
 
   it('shows empty state + 新建一集 when no episodes', async () => {
     vi.mocked(projectsApi.get).mockResolvedValue(projectWith([]))
@@ -71,5 +78,31 @@ describe('ProjectEpisodesPage', () => {
     await waitFor(() => screen.getByText('第一集'))
     fireEvent.click(screen.getByText('第一集'))
     expect(mockNavigate).toHaveBeenCalledWith('/episodes/e1')
+  })
+
+  it('小说作品挂载改编面板', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(projectWith([]))
+    vi.mocked(adaptationApi.get).mockResolvedValue({
+      adaptation_status: 'none', adapted_draft: [], source_text: '小说正文',
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('开始改编')).toBeInTheDocument())
+  })
+
+  // 面板建集后必须刷新剧集列表,否则新建的 N 集要手动刷新页面才看得见。
+  it('建集完成后刷新剧集列表', async () => {
+    vi.mocked(projectsApi.get).mockResolvedValue(projectWith([]))
+    vi.mocked(adaptationApi.get).mockResolvedValue({
+      adaptation_status: 'draft_ready', source_text: '小说正文',
+      adapted_draft: [{ index: 1, title: '第 1 集', screenplay: '正文' }],
+    })
+    vi.mocked(adaptationApi.commit).mockResolvedValue({
+      episodes: [], adaptation_status: 'committed',
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('确认,建出 1 集')).toBeInTheDocument())
+    expect(projectsApi.get).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByText('确认,建出 1 集'))
+    await waitFor(() => expect(projectsApi.get).toHaveBeenCalledTimes(2))
   })
 })

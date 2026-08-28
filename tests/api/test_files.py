@@ -51,7 +51,7 @@ async def episode_id(client, project_id):
     from drama_agent.db.models import Script
     sid = str(uuid.uuid4())
     async with db_session.AsyncSessionLocal() as s:
-        s.add(Script(id=sid, title="剧", source_text="x", content="正文", status="completed"))
+        s.add(Script(id=sid, title="剧", source_text="x", content="正文"))
         await s.commit()
     resp = await client.post(f"/api/projects/{project_id}/episodes",
                              json={"title": "e", "script_id": sid})
@@ -144,3 +144,127 @@ async def test_export_final_video_exists(client, episode_id, tmp_path):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("video/mp4")
     assert resp.content == b"fake final video content"
+
+
+# ── 参考图绑定:ref_type 的权威在后端 ────────────────────────────────
+@pytest.mark.asyncio
+async def test_put_then_get_references_round_trips_ref_type(client, episode_id):
+    """从素材库选的角色参考图,名字不在 story_analysis 里也必须仍归为 character。
+
+    这是回归拦截:ref_type 若只存在于请求体、既不落库也不下发,前端只能按
+    "名字在不在角色表里"反猜类型,于是这条被判成了背景图。
+    """
+    put = await client.put(f"/api/episodes/{episode_id}/references", json={
+        "references": [{"key": "测试", "ref_type": "character", "image_url": "/img/t.png"}],
+    })
+    assert put.status_code == 200
+
+    got = await client.get(f"/api/episodes/{episode_id}/references")
+    assert got.status_code == 200
+    entries = {e["key"]: e for e in got.json()["references"]}
+    assert entries["测试"]["ref_type"] == "character"
+    assert entries["测试"]["image_url"] == "/img/t.png"
+
+
+@pytest.mark.asyncio
+async def test_put_references_rejects_unknown_ref_type(client, episode_id):
+    """非法 ref_type → 400,不能静默落成自由字符串。"""
+    resp = await client.put(f"/api/episodes/{episode_id}/references", json={
+        "references": [{"key": "道具", "ref_type": "prop", "image_url": "/img/p.png"}],
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_put_references_replaces_whole_list(client, episode_id):
+    """PUT 是整表替换:上一次提交里被删掉的条目不该复活。"""
+    await client.put(f"/api/episodes/{episode_id}/references", json={
+        "references": [
+            {"key": "A", "ref_type": "character", "image_url": "/a.png"},
+            {"key": "B", "ref_type": "background", "image_url": "/b.png"},
+        ],
+    })
+    await client.put(f"/api/episodes/{episode_id}/references", json={
+        "references": [{"key": "A", "ref_type": "character", "image_url": "/a.png"}],
+    })
+    keys = [e["key"] for e in (await client.get(f"/api/episodes/{episode_id}/references")).json()["references"]]
+    assert keys == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_get_references_does_not_list_character_placeholders(client, project_id):
+    """角色**不再**产生参考图占位 —— 角色形象的唯一配置处是「角色」页的造型。
+
+    从源剧本的 story_analysis 列角色占位,会与造型指派重复表达同一件事。
+    这条删掉就会放走那个双入口回归。
+    """
+    import uuid
+    import drama_agent.db.session as db_session
+    from drama_agent.db.models import Script
+    sid = str(uuid.uuid4())
+    async with db_session.AsyncSessionLocal() as s:
+        s.add(Script(id=sid, title="剧", source_text="x", content="正文",
+                     story_analysis={"characters": [{"name": "陈薇"}, {"name": "林夏"}]}))
+        await s.commit()
+    eid = (await client.post(f"/api/projects/{project_id}/episodes",
+                             json={"title": "e", "script_id": sid})).json()["id"]
+
+    entries = (await client.get(f"/api/episodes/{eid}/references")).json()["references"]
+    assert [e["key"] for e in entries] == []
+
+
+@pytest.mark.asyncio
+async def test_get_references_lists_background_placeholders_from_shots(client, episode_id):
+    """分镜地点仍要自动列成待上传的背景占位 —— 背景没有实体,这是它唯一的入口,
+    去掉的话用户得自己把每个场景名敲一遍。"""
+    import drama_agent.db.session as db_session
+    from drama_agent.db.models import Episode
+    from sqlalchemy import select
+    async with db_session.AsyncSessionLocal() as s:
+        ep = (await s.execute(select(Episode).where(Episode.id == episode_id))).scalar_one()
+        ep.state_snapshot = {"shots": [{"location": "INT. 客厅 - 日"}, {"location": "天台"}]}
+        await s.commit()
+
+    entries = (await client.get(f"/api/episodes/{episode_id}/references")).json()["references"]
+    assert [(e["key"], e["ref_type"]) for e in entries] == [
+        ("INT. 客厅 - 日", "background"),
+        ("天台", "background"),
+    ]
+    # 仅探测出来的占位不是用户记录 → 不给删除入口(前端据此隐藏 ✕)
+    assert all(e["removable"] is False for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_get_references_upgrades_legacy_snapshot(client, episode_id):
+    """旧库里的 character_references 快照要按角色读出来,不能整体错位到背景组。"""
+    import drama_agent.db.session as db_session
+    from drama_agent.db.models import Episode
+    from sqlalchemy import select
+    async with db_session.AsyncSessionLocal() as s:
+        ep = (await s.execute(select(Episode).where(Episode.id == episode_id))).scalar_one()
+        ep.state_snapshot = {"character_references": {"旧角色": "/legacy.png"}}
+        await s.commit()
+
+    entries = (await client.get(f"/api/episodes/{episode_id}/references")).json()["references"]
+    assert [(e["key"], e["ref_type"], e["image_url"]) for e in entries] == [
+        ("旧角色", "character", "/legacy.png"),
+    ]
+
+
+# ── 图片读取:可读类型 ⊃ 可上传类型 ──────────────────────────────────
+@pytest.mark.asyncio
+async def test_serve_keyframe_image_is_allowed(client, project_id, tmp_path):
+    """关键帧由节点生成、不接受上传,但其 URL 必须可读 —— 否则关键帧缩略图必然坏掉。"""
+    (tmp_path / "s1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    with patch("drama_agent.services.storage_service.storage_service.get_project_image_dir",
+               return_value=tmp_path):
+        resp = await client.get(f"/api/projects/{project_id}/images/keyframe/s1.png")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_serve_image_rejects_unknown_type(client, project_id, tmp_path):
+    with patch("drama_agent.services.storage_service.storage_service.get_project_image_dir",
+               return_value=tmp_path):
+        resp = await client.get(f"/api/projects/{project_id}/images/bogus/s1.png")
+    assert resp.status_code == 400

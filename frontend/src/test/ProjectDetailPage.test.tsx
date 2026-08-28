@@ -6,15 +6,20 @@ import './mocks'
 
 vi.mock('../services/api', () => ({
   projectsApi: { get: vi.fn() },
-  episodesApi: { get: vi.fn() },
-  workflowApi: { start: vi.fn(), resume: vi.fn(), status: vi.fn() },
+  episodesApi: { get: vi.fn(), update: vi.fn() },
+  workflowApi: {
+    start: vi.fn(), resume: vi.fn(), status: vi.fn(),
+    reviseEpisode: vi.fn(), editEpisode: vi.fn(), revertEpisode: vi.fn(),
+  },
   filesApi: {
     uploadImage: vi.fn(),
-    updateReferences: vi.fn(),
-    getReferences: vi.fn(() => Promise.resolve({})),
+    copyFromAsset: vi.fn(),
+    updateReferences: vi.fn(() => Promise.resolve([])),
+    getReferences: vi.fn(() => Promise.resolve([])),
     exportUrl: (id: string) => `/api/episodes/${id}/export`,
     downloadUrl: (id: string, f: string) => `/api/episodes/${id}/files/${f}`,
   },
+  assetsApi: { list: vi.fn(() => Promise.resolve([])) },
   artifactsApi: {
     listByShot: vi.fn(() => Promise.resolve([])),
     listActions: vi.fn(() => Promise.resolve([])),
@@ -24,6 +29,7 @@ vi.mock('../services/api', () => ({
     list: vi.fn(() => Promise.resolve([])),
     listLooks: vi.fn(() => Promise.resolve([])),
   },
+  scriptsApi: { saveFromEpisode: vi.fn() },
   createWebSocket: vi.fn(),
 }))
 
@@ -34,7 +40,7 @@ vi.mock('react-router-dom', async () => {
 })
 
 import ProjectDetailPage from '../pages/ProjectDetailPage'
-import { episodesApi, workflowApi, charactersApi, createWebSocket } from '../services/api'
+import { episodesApi, workflowApi, charactersApi, scriptsApi, createWebSocket } from '../services/api'
 import { Toast, Modal } from '@douyinfe/semi-ui'
 
 const PROJECT_ID = 'proj-123'
@@ -76,6 +82,16 @@ const baseStatus = {
   },
 }
 
+const keyframePipeline = {
+  // 真实后端:开了 use_keyframes 才会暂停在 keyframes_review,流水线里也就必然有这一步
+  steps: [
+    ...baseStatus.pipeline.steps.slice(0, 6),
+    { key: 'keyframes', label: '关键帧' },
+    ...baseStatus.pipeline.steps.slice(6),
+  ],
+  current: 'keyframes',
+}
+
 function makeWsMock() {
   const ws: any = { onmessage: null, onclose: null, close: vi.fn() }
   return ws
@@ -89,6 +105,19 @@ const renderPage = () =>
       </Routes>
     </MemoryRouter>
   )
+
+/**
+ * 内容按步骤分页:要断言某一步的内容,先点左栏对应的 Step。
+ * 点击即"钉"在该步,不会被后台推进抢走(点回当前步则恢复自动跟随)。
+ */
+const gotoStep = async (label: string) => {
+  const step = await waitFor(() => {
+    const el = screen.getAllByTestId('step').find(e => e.textContent === label)
+    if (!el) throw new Error(`未找到步骤: ${label}`)
+    return el
+  })
+  fireEvent.click(step)
+}
 
 describe('ProjectDetailPage', () => {
   let wsMock: ReturnType<typeof makeWsMock>
@@ -218,6 +247,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'screenplay_review' })
     renderPage()
+    await gotoStep('审核剧本')
     await waitFor(() => expect(screen.getByText('通过')).toBeInTheDocument())
     expect(screen.getByText('修改')).toBeInTheDocument()
     expect(screen.getByText('等待您审核剧本，确认内容后点击「通过」，或提交修改意见')).toBeInTheDocument()
@@ -236,10 +266,54 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'screenplay_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({})
     renderPage()
+    await gotoStep('审核剧本')
     await waitFor(() => screen.getByText('通过'))
     fireEvent.click(screen.getByText('通过'))
     await waitFor(() => expect(workflowApi.resume).toHaveBeenCalledWith(EPISODE_ID, expect.objectContaining({ approved: true })))
     expect(Toast.success).toHaveBeenCalledWith('剧本已通过')
+  })
+
+  it('剧本审核面板展示 AI 改写入口与版本树', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'screenplay_review',
+      db_status: 'paused',
+      paused_at: 'screenplay_review',
+      screenplay: '旧正文',
+      screenplay_versions: [{ screenplay: '旧正文', label: '初稿', created_at: null }],
+      screenplay_version_current: 0,
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'screenplay_review' })
+    renderPage()
+    await gotoStep('审核剧本')
+    await waitFor(() => expect(screen.getByText('AI 改写助手')).toBeInTheDocument())
+    // 版本树:后端 status 下发的 screenplay_versions 渲染成版本下拉
+    expect(screen.getByText('版本1·初稿')).toBeInTheDocument()
+  })
+
+  it('AI 改写发送 → 调 reviseEpisode;apply 后刷新 status', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'screenplay_review',
+      db_status: 'paused',
+      paused_at: 'screenplay_review',
+      screenplay: '旧正文',
+      screenplay_versions: [{ screenplay: '旧正文', label: '初稿', created_at: null }],
+      screenplay_version_current: 0,
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'screenplay_review' })
+    vi.mocked(workflowApi.reviseEpisode).mockResolvedValue({
+      action: 'apply', reply: '改好了', screenplay: '新正文', version_index: 1, versions_len: 2,
+    })
+    renderPage()
+    await gotoStep('审核剧本')
+    const input = await screen.findByPlaceholderText('和编剧助手说说想怎么改…')
+    fireEvent.change(input, { target: { value: '改活泼点' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(workflowApi.reviseEpisode).toHaveBeenCalledWith(
+      EPISODE_ID, [{ role: 'user', content: '改活泼点' }]))
+    // apply → 面板回调 onApplied → 父页 refreshStatus → status 再拉一次
+    await waitFor(() => expect(workflowApi.status).toHaveBeenCalledTimes(2))
   })
 
   // ── Storyboard ────────────────────────────────────────────────────────────
@@ -256,6 +330,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
     renderPage()
+    await gotoStep('分镜')
     await waitFor(() => expect(screen.getByText('分镜脚本 · 1 个镜头')).toBeInTheDocument())
     expect(screen.getByText('第一个镜头描述')).toBeInTheDocument()
     expect(screen.getByText('5s')).toBeInTheDocument()
@@ -274,6 +349,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByText('视频 Prompt · 1 个')).toBeInTheDocument())
     expect(screen.getByText('全部确认，开始生成视频')).toBeInTheDocument()
     expect(screen.getByDisplayValue('a cinematic shot')).toBeInTheDocument()
@@ -291,6 +367,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({})
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => screen.getByDisplayValue('original prompt'))
     fireEvent.change(screen.getByDisplayValue('original prompt'), { target: { value: 'edited prompt' } })
     fireEvent.click(screen.getByText('全部确认，开始生成视频'))
@@ -317,6 +394,7 @@ describe('ProjectDetailPage', () => {
       { id: 'look-b', character_id: 'c1', name: '西装', is_default: false },
     ])
     renderPage()
+    await gotoStep('审核造型')
     await waitFor(() => expect(screen.getByText('审核服装造型（场景 → 角色 → 造型）')).toBeInTheDocument())
     expect(screen.getByText('场景 1')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('西装')).toBeInTheDocument())
@@ -338,6 +416,7 @@ describe('ProjectDetailPage', () => {
     ])
     vi.mocked(workflowApi.resume).mockResolvedValue({})
     renderPage()
+    await gotoStep('审核造型')
     await waitFor(() => screen.getByText('西装'))
     fireEvent.change(screen.getByDisplayValue('休闲装'), { target: { value: 'look-b' } })
     fireEvent.click(screen.getByText('确认造型'))
@@ -366,6 +445,7 @@ describe('ProjectDetailPage', () => {
     ])
     vi.mocked(workflowApi.resume).mockResolvedValue({})
     renderPage()
+    await gotoStep('审核造型')
     await waitFor(() => screen.getByText('西装'))
     fireEvent.change(screen.getByDisplayValue('休闲装'), { target: { value: 'look-b' } })
     // A WebSocket-driven refresh must not reset the user's pending selection
@@ -387,11 +467,13 @@ describe('ProjectDetailPage', () => {
       current_stage: 'keyframes_review',
       db_status: 'paused',
       paused_at: 'keyframes_review',
+      pipeline: keyframePipeline,
       shots: [{ shot_id: 's1', scene_number: 1, shot_number: 1, shot_type: '全景', camera_movement: '', duration_seconds: 5, description: '', characters: [], dialogue: '', action: '', location: '' }],
       prompts: [{ shot_id: 's1', prompt_text: 'a cinematic shot', negative_prompt: '', approved: false, keyframe_url: '/u.png' }],
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'keyframes_review' })
     renderPage()
+    await gotoStep('关键帧')
     await waitFor(() => expect(screen.getByText('审核关键帧（勾选要重生成的镜头）')).toBeInTheDocument())
     expect(screen.getByAltText('s1')).toHaveAttribute('src', '/u.png')
     expect(screen.getByText('确认，生成视频')).toBeInTheDocument()
@@ -403,12 +485,14 @@ describe('ProjectDetailPage', () => {
       current_stage: 'keyframes_review',
       db_status: 'paused',
       paused_at: 'keyframes_review',
+      pipeline: keyframePipeline,
       shots: [{ shot_id: 's1', scene_number: 1, shot_number: 1, shot_type: '全景', camera_movement: '', duration_seconds: 5, description: '', characters: [], dialogue: '', action: '', location: '' }],
       prompts: [{ shot_id: 's1', prompt_text: 'a cinematic shot', negative_prompt: '', approved: false, keyframe_url: '/u.png' }],
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'keyframes_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({})
     renderPage()
+    await gotoStep('关键帧')
     await waitFor(() => screen.getByText('重生成所选'))
     fireEvent.click(screen.getByText('重生成').closest('label')!.querySelector('input')!)
     fireEvent.click(screen.getByText('重生成所选'))
@@ -429,6 +513,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'videos_generated' })
     renderPage()
+    await gotoStep('生成视频')
     await waitFor(() => expect(screen.getByText('视频生成进度')).toBeInTheDocument())
     expect(screen.getByText('生成中')).toBeInTheDocument()
   })
@@ -442,6 +527,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'videos_generated' })
     renderPage()
+    await gotoStep('生成视频')
     // "完成" tag — distinguish from "完成" step by checking for the videos section
     await waitFor(() => expect(screen.getByText('视频生成进度')).toBeInTheDocument())
     expect(screen.getAllByText('完成').length).toBeGreaterThan(0)
@@ -456,6 +542,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'videos_generated' })
     renderPage()
+    await gotoStep('生成视频')
     await waitFor(() => expect(screen.getByText('错误: 生成超时')).toBeInTheDocument())
   })
 
@@ -469,6 +556,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'completed' })
     renderPage()
+    await gotoStep('完成')
     await waitFor(() => expect(screen.getByText('✦ 最终成片')).toBeInTheDocument())
     expect(screen.getByText('下载完整视频')).toBeInTheDocument()
   })
@@ -655,6 +743,223 @@ describe('ProjectDetailPage', () => {
     expect(doneStep).toHaveAttribute('data-status', 'finish')
   })
 
+  it('点击未推进到的步不切换面板(那边没内容,切过去只会得到空面板)', async () => {
+    // 锚点必须选**步骤专属**的内容:故事分析/参考图是跨步骤常驻的,拿它们断言的话
+    // 无论守卫在不在都恒真(切换与否它们都在屏幕上),测试会变成永远通过的假绿。
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'storyboard_ready',
+      db_status: 'running',
+      pipeline: { ...baseStatus.pipeline, current: 'storyboard' },
+      shots: [{
+        shot_id: 's1', scene_number: 1, shot_number: 1, shot_type: '全景',
+        camera_movement: '固定', duration_seconds: 5,
+        description: '分镜步专属内容', characters: [], dialogue: '', action: '', location: '',
+      }],
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
+    renderPage()
+    // 当前步(分镜)的专属内容已在右栏
+    await waitFor(() => expect(screen.getByText('分镜步专属内容')).toBeInTheDocument())
+    const later = screen.getAllByTestId('step').find(el => el.textContent === '生成视频')!
+    fireEvent.click(later)
+    // 仍停在当前步,没有跳到"该步骤尚未开始"的空面板
+    await waitFor(() => expect(screen.getByText('分镜步专属内容')).toBeInTheDocument())
+    expect(screen.queryByText('该步骤尚未开始')).not.toBeInTheDocument()
+  })
+
+  // ── 跨步骤常驻上下文 ──────────────────────────────────────────────────────
+
+  it('流程推进过第一步后,故事分析与参考图仍在屏幕上(不随步骤离开)', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'screenplay_review',
+      db_status: 'paused',
+      paused_at: 'screenplay_review',
+      pipeline: { ...baseStatus.pipeline, current: 'screenplay_review' },
+      screenplay: '剧本正文',
+      story_analysis: {
+        title: '测试', genre: '现代剧', tone: '轻松', themes: [],
+        plot_summary: '这是一个故事梗概', characters: [], setting: '都市',
+      },
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'screenplay_review' })
+    renderPage()
+    // 当前步是审核剧本,但故事分析/参考图作为常驻上下文仍须可见 ——
+    // 只挂在 analysis 步下的话,流程一走过第一步它们就双双离开屏幕
+    await waitFor(() => expect(screen.getByText('剧本正文')).toBeInTheDocument())
+    expect(screen.getByText('这是一个故事梗概')).toBeInTheDocument()
+    expect(screen.getByText('参考图片')).toBeInTheDocument()
+  })
+
+  // ── 存入剧本库 ────────────────────────────────────────────────────────────
+
+  // ── 故事内容(用户输入的源头) ──────────────────────────────────────────────
+
+  it('详情页展示用户输入的原始故事,且流程推进后仍可见', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'screenplay_review',
+      db_status: 'paused',
+      paused_at: 'screenplay_review',
+      pipeline: { ...baseStatus.pipeline, current: 'screenplay_review' },
+      screenplay: '剧本正文',
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({
+      ...baseEpisode, status: 'screenplay_review', raw_input: '一个关于孤独的故事',
+    })
+    renderPage()
+    // 用户自己输入的内容是所有产出的源头,不该在任何步骤下从界面消失
+    await waitFor(() => expect(screen.getByText('一个关于孤独的故事')).toBeInTheDocument())
+    expect(screen.getByText('故事内容')).toBeInTheDocument()
+  })
+
+  it('created 态可编辑故事内容并保存', async () => {
+    vi.mocked(episodesApi.get).mockResolvedValue({
+      ...baseEpisode, raw_input: '原始故事',
+    })
+    vi.mocked(episodesApi.update).mockResolvedValue({ ...baseEpisode, raw_input: '改过的故事' })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('原始故事')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('编辑'))
+    const area = await screen.findByDisplayValue('原始故事')
+    fireEvent.change(area, { target: { value: '改过的故事' } })
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => expect(episodesApi.update).toHaveBeenCalledWith(
+      PROJECT_ID, EPISODE_ID, { raw_input: '改过的故事' }))
+    expect(Toast.success).toHaveBeenCalledWith('已保存')
+  })
+
+  it('已开拍后不给编辑入口 —— 改原文会让已生成的剧本与源头不符', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'storyboard_ready',
+      db_status: 'running',
+      pipeline: { ...baseStatus.pipeline, current: 'storyboard' },
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({
+      ...baseEpisode, status: 'storyboard_ready', raw_input: '原始故事',
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('原始故事')).toBeInTheDocument())
+    expect(screen.queryByText('编辑')).not.toBeInTheDocument()
+    expect(screen.getByText('已开拍，如需调整请在剧本审核阶段改写')).toBeInTheDocument()
+  })
+
+  // ── 确认角色(身份对齐) ────────────────────────────────────────────────────
+
+  const castPipeline = {
+    steps: [
+      { key: 'analysis', label: '故事分析' },
+      { key: 'cast', label: '确认角色' },
+      ...baseStatus.pipeline.steps.slice(1),
+    ],
+    current: 'cast',
+  }
+
+  it('停在确认角色步时列出待确认人物与候选角色', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'cast_review',
+      db_status: 'paused',
+      paused_at: 'cast_review',
+      pipeline: castPipeline,
+      cast_pending: [
+        { name: '李明', appearance: '中年男子', suggestions: [{ character_id: 'c1', name: '路人甲-女1' }] },
+      ],
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'cast_review' })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('李明')).toBeInTheDocument())
+    expect(screen.getByText('中年男子')).toBeInTheDocument()
+    // 候选来自后端下发的 suggestions,前端不自己拉角色列表
+    expect(screen.getByText('关联到「路人甲-女1」')).toBeInTheDocument()
+    expect(screen.getByText('新建为新角色')).toBeInTheDocument()
+  })
+
+  it('确认角色:选了关联则 resume 带 link + character_id', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'cast_review',
+      db_status: 'paused',
+      paused_at: 'cast_review',
+      pipeline: castPipeline,
+      cast_pending: [
+        { name: '李明', appearance: '', suggestions: [{ character_id: 'c1', name: '路人甲-女1' }] },
+      ],
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'cast_review' })
+    vi.mocked(workflowApi.resume).mockResolvedValue({})
+    renderPage()
+    await waitFor(() => screen.getByText('确认，继续写剧本'))
+    const select = screen.getByText('关联到「路人甲-女1」').closest('select')!
+    fireEvent.change(select, { target: { value: 'c1' } })
+    fireEvent.click(screen.getByText('确认，继续写剧本'))
+    await waitFor(() => expect(workflowApi.resume).toHaveBeenCalledWith(
+      EPISODE_ID,
+      expect.objectContaining({ approved: true, cast: { 李明: { action: 'link', character_id: 'c1' } } })
+    ))
+  })
+
+  it('确认角色:未选则按新建提交 —— 剧本里出场的角色不能被悄悄丢掉', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'cast_review',
+      db_status: 'paused',
+      paused_at: 'cast_review',
+      pipeline: castPipeline,
+      cast_pending: [{ name: '李明', appearance: '', suggestions: [] }],
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'cast_review' })
+    vi.mocked(workflowApi.resume).mockResolvedValue({})
+    renderPage()
+    await waitFor(() => screen.getByText('确认，继续写剧本'))
+    fireEvent.click(screen.getByText('确认，继续写剧本'))
+    await waitFor(() => expect(workflowApi.resume).toHaveBeenCalledWith(
+      EPISODE_ID,
+      expect.objectContaining({ cast: { 李明: { action: 'create' } } })
+    ))
+  })
+
+  it('剧本审核通过后(非审核态)仍可存入剧本库 —— 剧本库页承诺的正是"通过后可存入"', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'storyboard_ready',
+      db_status: 'running',
+      pipeline: { ...baseStatus.pipeline, current: 'storyboard' },
+      screenplay: '已通过的剧本正文',
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
+    vi.mocked(scriptsApi.saveFromEpisode).mockResolvedValue({ id: 'sc-new' } as any)
+    renderPage()
+    await gotoStep('生成剧本')
+    await waitFor(() => expect(screen.getByText('存入剧本库')).toBeInTheDocument())
+    // 通过后审核按钮已消失,但存入入口必须还在
+    expect(screen.queryByText('通过')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('存入剧本库'))
+    await waitFor(() => expect(scriptsApi.saveFromEpisode).toHaveBeenCalledWith(EPISODE_ID))
+    expect(Toast.success).toHaveBeenCalledWith('已存入剧本库')
+  })
+
+  it('存入剧本库失败时展示后端 detail(如正文为空 → 409)', async () => {
+    vi.mocked(workflowApi.status).mockResolvedValue({
+      ...baseStatus,
+      current_stage: 'storyboard_ready',
+      db_status: 'running',
+      pipeline: { ...baseStatus.pipeline, current: 'storyboard' },
+      screenplay: '正文',
+    })
+    vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
+    vi.mocked(scriptsApi.saveFromEpisode).mockRejectedValue({
+      response: { data: { detail: '该集剧本尚未通过或正文为空' } },
+    })
+    renderPage()
+    await gotoStep('生成剧本')
+    await waitFor(() => screen.getByText('存入剧本库'))
+    fireEvent.click(screen.getByText('存入剧本库'))
+    await waitFor(() => expect(Toast.error).toHaveBeenCalledWith('存入失败: 该集剧本尚未通过或正文为空'))
+  })
+
   it('合成失败(assembly_failed)时当前步标记为 error', async () => {
     vi.mocked(workflowApi.status).mockResolvedValue({
       ...baseStatus,
@@ -684,6 +989,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
     renderPage()
+    await gotoStep('分镜')
     await waitFor(() => expect(screen.getByText('分镜脚本 · 1 个镜头')).toBeInTheDocument())
     // location 同时会出现在「参考图」区(每个地点一条参考项),故把断言限定在分镜表格内
     const table = screen.getByText('第一个镜头描述').closest('table')!
@@ -711,6 +1017,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
     renderPage()
+    await gotoStep('分镜')
     await waitFor(() => expect(screen.getByText('分镜脚本 · 1 个镜头')).toBeInTheDocument())
     fireEvent.click(screen.getByText('空镜头').closest('tr')!)
     await waitFor(() => expect(screen.getByText('（无台词）')).toBeInTheDocument())
@@ -731,6 +1038,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(workflowApi.status).mockResolvedValue(promptsReviewStatus)
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByText('全部确认，开始生成视频')).toBeInTheDocument())
     expect(screen.getByText('退回重新生成')).toBeInTheDocument()
   })
@@ -740,6 +1048,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({} as any)
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => screen.getByText('退回重新生成'))
     fireEvent.click(screen.getByText('退回重新生成'))
     expect(Modal.confirm).toHaveBeenCalledOnce()
@@ -761,6 +1070,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({} as any)
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => screen.getByText('全部确认，开始生成视频'))
     fireEvent.click(screen.getByText('全部确认，开始生成视频'))
     await waitFor(() => expect(workflowApi.resume).toHaveBeenCalledWith(
@@ -774,6 +1084,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({} as any)
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => screen.getByText('退回重新生成'))
     fireEvent.click(screen.getByText('退回重新生成'))
     const opts = (Modal as any)._lastConfirm.current
@@ -799,6 +1110,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByDisplayValue('a shot')).toBeInTheDocument())
     expect(screen.getByDisplayValue('blurry, watermark')).toBeInTheDocument()
   })
@@ -815,6 +1127,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     vi.mocked(workflowApi.resume).mockResolvedValue({} as any)
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => screen.getByDisplayValue('blurry'))
     fireEvent.change(screen.getByDisplayValue('blurry'), { target: { value: 'blurry, low res' } })
     fireEvent.click(screen.getByText('全部确认，开始生成视频'))
@@ -833,6 +1146,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_approved' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByText('视频 Prompt · 1 个')).toBeInTheDocument())
     expect(screen.getByText('负向：blurry, low res')).toBeInTheDocument()
     expect(screen.queryByDisplayValue('blurry')).not.toBeInTheDocument()
@@ -847,6 +1161,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_approved' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByText('视频 Prompt · 1 个')).toBeInTheDocument())
     expect(screen.queryByText('负向：blurry')).not.toBeInTheDocument()
     expect(screen.queryByText(/负向/)).not.toBeInTheDocument()
@@ -861,6 +1176,7 @@ describe('ProjectDetailPage', () => {
     })
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_approved' })
     renderPage()
+    await gotoStep('Prompt')
     await waitFor(() => expect(screen.getByText('视频 Prompt · 1 个')).toBeInTheDocument())
     expect(screen.queryByText(/负向/)).not.toBeInTheDocument()
   })

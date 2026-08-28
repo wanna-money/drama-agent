@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import socket
 import json
@@ -19,6 +20,7 @@ from drama_agent.api.assets import router as assets_router
 from drama_agent.api.characters import router as characters_router
 from drama_agent.api.prompt import router as prompt_router
 from drama_agent.api.scripts import router as scripts_router
+from drama_agent.api.adaptation import router as adaptation_router
 from drama_agent.api.websocket import manager, backfill_events
 from drama_agent.workflow.worker import JobWorker
 import structlog
@@ -52,6 +54,13 @@ async def lifespan(app: FastAPI):
     yield
     await worker.stop()
     app.state.worker_task.cancel()
+    # 等 worker 真正结束再关图 —— 它正拿着同一个 checkpointer 跑作业
+    with contextlib.suppress(asyncio.CancelledError):
+        await app.state.worker_task
+    # checkpointer 连接必须显式关闭:它的 aiosqlite 工作线程是非 daemon 的,
+    # 不关就会让进程永远退不出去(留下占着端口和 db 的僵尸)。详见 close_graphs。
+    from drama_agent.workflow.graph import close_graphs
+    await close_graphs()
     logger.info("Drama Agent shutting down")
 
 
@@ -77,6 +86,7 @@ app.include_router(assets_router)
 app.include_router(characters_router)
 app.include_router(prompt_router)
 app.include_router(scripts_router)
+app.include_router(adaptation_router)
 
 
 @app.websocket("/ws/episodes/{episode_id}")

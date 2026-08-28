@@ -67,5 +67,9 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
+    # 单集目标时长(秒)。驱动剧本篇幅与分镜镜头数 —— 不设的话 LLM 会自己编一个
+    # "时长：约8-10分钟"式的表头,与实际出片长度毫无关系。
+    target_episode_seconds: int = 120
+
 
 settings = Settings()
