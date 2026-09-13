@@ -71,7 +71,12 @@ START → story_analyzer → screenplay_writer → screenplay_review[interrupt]
 **扩展点**(加东西走这些,别另起炉灶):
 - 加 LLM 模型:`config.py` 的 `llm_models` 追加条目。
 - 加视频 provider:`video_service.py` 新增 `*VideoService`(声明 `provider_name`/`supported_actions`)并在 `get_provider` 注册;`config.py` 的 `video_models` 加条目(含 `resolutions`/`default_resolution`,驱动前端联动下拉)。
+- **接一个新网关(同协议、路径/响应不同)**:不要新增 protocol —— 在「模型管理」给那条 provider 填 `paths` + `response_map`(零代码)。功能键词表在 `provider/ops.py`(唯一真相,前端表单与后端校验都读它);新增 protocol 时在此登记一行。详见 `docs/user-manual.md` 附录「自定义接入路径」。
 - 加视频动作:`video_actions.py` 的 `ACTIONS` 加一个 `Action`(谓词 + execute),参数走 `param_schema`(前端 `ActionParamForm` 按 schema 自动渲染,支持 enum/int/text/file/audio)。
+- **接一个新的公网对象存储**:`services/public_storage.py` 新增 `PublicStorage`
+  子类 + `_BACKEND_IMPLS` 登记一行;声明走「存储管理」页(存 `custom_providers`
+  表 `kind="storage"`)。**视频参考只接受公网 URL**(没有 base64 那条路),
+  故不配存储时「视频编辑/延长」不可用。
 - 配置:全部集中在 `config.py`(pydantic-settings,读 `.env`);MiniMax 文本用 `minimax_*`,H3 视频用独立的 `minimax_video_*`(域名 `api.minimaxi.com`,勿与旧版 `api.minimax.chat` 混淆)。
 
 **任务运行时与状态**(重构后,分布式设计):
@@ -85,6 +90,35 @@ START → story_analyzer → screenplay_writer → screenplay_review[interrupt]
 **DB 无迁移工具**:靠 `db/session.py:init_db()` 的 `create_all` 建表。新增表/字段加到 `db/models.py` 即自动建(仅新库;已有库不会自动 ALTER)。生产 Postgres(`postgresql+asyncpg`)启用多实例;本地/测试 SQLite 降级路径,方言差异只在 `db/dialect.py`。给已有库加列须手动执行一次 ALTER,例如 `custom_providers.builtin`:
 - SQLite:`ALTER TABLE custom_providers ADD COLUMN builtin BOOLEAN NOT NULL DEFAULT 0;`
 - Postgres:`ALTER TABLE custom_providers ADD COLUMN builtin BOOLEAN NOT NULL DEFAULT false;`
+
+`custom_providers.paths_json` / `response_map_json`(自定义接入路径,见
+`docs/user-manual.md` 附录「自定义接入路径」):
+- SQLite:`ALTER TABLE custom_providers ADD COLUMN paths_json JSON;`(response_map_json 同)
+- Postgres:`ALTER TABLE custom_providers ADD COLUMN paths_json JSONB DEFAULT '{}'::jsonb;`
+
+`clips`(散片直接生成,见
+`docs/superpowers/specs/2026-09-07-simple-mode-clip-generation-design.md`):
+已有库跑一次 `.venv/bin/python scripts/migrate_clips.py`(幂等,表已存在则跳过)。
+
+`custom_providers.config_json`(存储 provider 的 bucket/region 等配置)与
+`clips` 的 `video_refs_json` / `task_type` / `storage_key`(视频编辑/延长,见
+`docs/superpowers/specs/2026-09-09-video-edit-extend-design.md`):
+已有库各跑一次 `.venv/bin/python scripts/migrate_storage.py`、
+`.venv/bin/python scripts/migrate_clip_video.py`(幂等)。
+
+`Project.visual_style`(作品级视觉风格,见
+`docs/superpowers/specs/2026-09-13-project-visual-style-design.md`):
+已有库跑一次 `.venv/bin/python scripts/migrate_visual_style.py`(幂等)。
+
+**新增会被 registry 读取的列时,读取处必须用 `getattr` 降级**:老库未 ALTER 时
+`row_to_provider` 抛异常 → registry 构建失败 → 整站没有任何可用模型。
+
+**新增 `Model` 的能力字段时,必须同时加进 `provider/seed.py` 的
+`CODE_OWNED_MODEL_FIELDS`**:registry 是从 DB 读的,而老库的 `models_json` 是旧版本
+代码写进去的。不加进那个回填清单,新字段对已装机器**永远是默认值** ——
+声明了 4-30 秒、接口下发的却是 0,而代码里怎么看都是对的。
+同理,给已有 provider **新增一个 model** 要靠 `_reconcile_models` 的追加逻辑
+(插入判断是 provider 粒度的),否则那个新模型在老库上永不出现。
 
 ## 工程规范(本仓库约定,写代码时遵守)
 
@@ -129,3 +163,16 @@ START → story_analyzer → screenplay_writer → screenplay_review[interrupt]
 ## 提交约定
 
 commit 信息用 `feat(scope):` / `fix(scope):` 前缀 + 简短描述。仅在用户明确要求时才提交。
+
+## 本地起停后端(信号必须到得了进程)
+
+后端**不要**用 `uv run uvicorn ...` 起:uv 把 uvicorn 当子进程拉起却不转发 SIGTERM,
+信号只到 uv,uvicorn 收不到 → FastAPI lifespan 的关停分支不执行 → `close_graphs()` 不跑,
+aiosqlite 的非 daemon 工作线程留着进程不退,继续占着 checkpoint db;多次重启堆起一批
+僵尸后,请求可能被事件循环已停的那个接走,后端整体无响应(只能 `kill -9`)。
+
+用 venv 的解释器直接跑(`start.sh` 已如此):
+```bash
+.venv/bin/python -m uvicorn drama_agent.main:app --host 0.0.0.0 --port 8888 --reload --reload-dir src
+```
+判据:停机日志里应出现 `Drama Agent shutting down`;没有它就说明信号没到,退出不干净。

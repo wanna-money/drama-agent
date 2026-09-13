@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # 素材库存储(工厂):开发本地目录 / 生产 CFS(预留)
     asset_storage_backend: str = "local"      # local | cfs
     asset_local_dir: str = "./data/assets"    # local backend 的素材根目录
+
+    # 图片/音频参考的送达方式:base64 内联(默认,与历史行为一致)或公网 URL。
+    # **视频不受这个开关影响** —— 平台对视频只接受公网 URL,没有 base64 那条路。
+    # 切 public 的用处:base64 有 64MB 请求体上限,Seedance 2.5 声明的 30 张参考图
+    # 在 base64 下发不出去。
+    ref_delivery_mode: str = "base64"
     seedance_endpoint_id: str = ""
     seedance_2_5_endpoint_id: str = ""       # Seedance 2.5 Ark 接入点(独立于 2.0)
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Modal, Input, InputNumber, Select, Toast, Tag, List, Card, Typography, Space, Divider, Form, Empty, Row, Col, Checkbox } from '@douyinfe/semi-ui'
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface'
 import { IconPlus, IconDelete } from '@douyinfe/semi-icons'
-import { providersApi, ProviderInfo, ProviderModel, ProviderInput, ModelCost } from '../services/api'
+import { providersApi, ProviderInfo, ProviderModel, ProviderInput, ModelCost, ProtocolCatalog } from '../services/api'
 import PageShell, { PageLoading } from '../components/PageShell'
 
 const { Text } = Typography
@@ -14,17 +14,25 @@ const emptyModel = (kind: Kind): ProviderModel => ({ id: '', label: '', kind })
 const blankInput = (): ProviderInput => ({
   provider_id: '', label: '', kind: 'llm', protocol: 'openai-compat',
   base_url: '', api_key: '', models: [emptyModel('llm')], enabled: true,
+  paths: {}, response_map: {},
 })
+
+const emptyCatalog: ProtocolCatalog = {
+  llm: [], video: [], image: [], storage: [], ops: {}, response_fields: {},
+}
 
 export default function ProvidersPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([])
-  const [protocols, setProtocols] = useState<{ llm: string[]; video: string[]; image: string[] }>({ llm: [], video: [], image: [] })
+  const [protocols, setProtocols] = useState<ProtocolCatalog>(emptyCatalog)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingBuiltin, setEditingBuiltin] = useState(false)
   const [form, setForm] = useState<ProviderInput>(blankInput())
   const [saving, setSaving] = useState(false)
+  // 自定义接入路径的开关状态不入库:paths/response_map 非空即"已启用"(单一真相)。
+  // 这里只记住"用户在本次编辑中把它展开了"——刚打开时字典还是空的。
+  const [accessOpen, setAccessOpen] = useState(false)
   const formApiRef = useRef<FormApi<ProviderInput> | null>(null)
 
   const load = () => {
@@ -36,19 +44,29 @@ export default function ProvidersPage() {
   }
   useEffect(load, [])
 
-  const openCreate = () => { setEditingId(null); setEditingBuiltin(false); setForm(blankInput()); setModalOpen(true) }
+  const openCreate = () => {
+    setEditingId(null); setEditingBuiltin(false); setForm(blankInput())
+    setAccessOpen(false); setModalOpen(true)
+  }
 
   const openEdit = async (p: ProviderInfo) => {
     try {
       const full = await providersApi.get(p.provider_id)
       setEditingId(p.provider_id)
       setEditingBuiltin(full.builtin)
+      // 本页只列 llm/video/image 三组(storage 走独立的存储管理页),故编辑入口
+      // 拿到的 full.kind 在运行时必落在 Kind 内;这里窄化类型以匹配本页表单。
+      const kind = full.kind as Kind
       setForm({
-        provider_id: full.provider_id, label: full.label, kind: full.kind,
+        provider_id: full.provider_id, label: full.label, kind,
         protocol: full.protocol, base_url: full.base_url || '', api_key: full.api_key || '',
-        models: full.models.length ? full.models : [emptyModel(full.kind)],
+        models: full.models.length ? full.models : [emptyModel(kind)],
         enabled: full.enabled,
+        paths: full.paths || {}, response_map: full.response_map || {},
       })
+      // 已有声明就展开:折叠着保存会把用户配好的路径连带清空
+      setAccessOpen(Object.keys(full.paths || {}).length > 0
+        || Object.keys(full.response_map || {}).length > 0)
       setModalOpen(true)
     } catch { Toast.error('读取失败') }
   }
@@ -70,9 +88,17 @@ export default function ProvidersPage() {
       : kind === 'video'
         ? (protocols.video[0] || 'seedance')
         : (protocols.image[0] || 'openai-image')
-    setForm(f => ({ ...f, kind, protocol, models: f.models.map(m => ({ ...m, kind })) }))
+    // 切类型意味着换 protocol,旧 protocol 的功能键在新 protocol 下不合法(后端会拒),
+    // 故一并清空,避免保存时才报错
+    setForm(f => ({ ...f, kind, protocol, models: f.models.map(m => ({ ...m, kind })),
+      paths: {}, response_map: {} }))
     formApiRef.current?.setValue('protocol', protocol)
   }
+
+  const setPath = (op: string, value: string) =>
+    setForm(f => ({ ...f, paths: { ...(f.paths || {}), [op]: value } }))
+  const setRespField = (field: string, value: string) =>
+    setForm(f => ({ ...f, response_map: { ...(f.response_map || {}), [field]: value } }))
 
   const updateModel = (i: number, patch: Partial<ProviderModel>) =>
     setForm(f => ({ ...f, models: f.models.map((m, idx) => idx === i ? { ...m, ...patch } : m) }))
@@ -86,16 +112,26 @@ export default function ProvidersPage() {
         return { ...m, cost: priced ? next : null }
       }),
     }))
-  const addModel = () => setForm(f => ({ ...f, models: [...f.models, emptyModel(f.kind)] }))
+  const addModel = () => setForm(f => ({ ...f, models: [...f.models, emptyModel(f.kind as Kind)] }))
   const removeModel = (i: number) => setForm(f => ({ ...f, models: f.models.filter((_, idx) => idx !== i) }))
   const setDefaultModel = (i: number) =>
     setForm(f => ({ ...f, models: f.models.map((m, idx) => ({ ...m, is_default: idx === i })) }))
   const clearDefaultModel = (i: number) =>
     setForm(f => ({ ...f, models: f.models.map((m, idx) => idx === i ? { ...m, is_default: false } : m) }))
 
+  /** 只提交真正填了值的项:空串会被后端当成非法路径拒掉,而"没填"应当表示走官方默认。 */
+  const nonEmpty = (d?: Record<string, string>) =>
+    Object.fromEntries(Object.entries(d || {}).filter(([, v]) => v.trim()))
+
   const save = async () => {
     const values = formApiRef.current?.getValues?.() as Partial<ProviderInput> | undefined
-    const payload: ProviderInput = { ...form, ...(values || {}), models: form.models, enabled: form.enabled }
+    const payload: ProviderInput = {
+      // values 里的 paths/response_map 是 Form 的旧快照,必须由 form 覆盖回来
+      ...form, ...(values || {}), models: form.models, enabled: form.enabled,
+      // 开关关闭 = 走官方默认,提交空字典把库里旧声明清掉
+      paths: accessOpen ? nonEmpty(form.paths) : {},
+      response_map: accessOpen ? nonEmpty(form.response_map) : {},
+    }
     if (!payload.provider_id?.trim()) { Toast.error('请输入 Provider ID'); return }
     if (payload.models.some(m => !m.id.trim() || !m.label.trim())) { Toast.error('每个模型需填 ID 和名称'); return }
     setSaving(true)
@@ -111,6 +147,51 @@ export default function ProvidersPage() {
   }
 
   const protoOptions = form.kind === 'llm' ? protocols.llm : form.kind === 'video' ? protocols.video : protocols.image
+  // 该 protocol 认的功能键与官方默认路径:词表来自后端,前端不另抄一份(规范 4)
+  const ops = protocols.ops[form.protocol] || {}
+  const respFields = protocols.response_fields || {}
+
+  const accessSection = () => (
+    <Space vertical align="start">
+      <Text type="tertiary">
+        网关把接口挂在非官方路径上时才需要填。留空走该协议官方路径。
+      </Text>
+      {Object.keys(ops).length === 0 ? (
+        <Text type="tertiary">该协议暂不支持自定义路径</Text>
+      ) : (
+        <Row gutter={[16, 12]}>
+          {Object.entries(ops).map(([op, def]) => (
+            <Col xs={24} md={12} key={op}>
+              <Space vertical align="start">
+                <Text>{op}</Text>
+                <Input
+                  value={form.paths?.[op] || ''} placeholder={def}
+                  onChange={v => setPath(op, v)}
+                />
+              </Space>
+            </Col>
+          ))}
+        </Row>
+      )}
+      <Divider />
+      <Text type="tertiary">
+        响应结构与官方不同时填。只需填不一样的那几项,其余按协议官方位置解析。
+      </Text>
+      <Row gutter={[16, 12]}>
+        {Object.entries(respFields).map(([field, desc]) => (
+          <Col xs={24} md={12} key={field}>
+            <Space vertical align="start">
+              <Text>{field}</Text>
+              <Input
+                value={form.response_map?.[field] || ''} placeholder={desc}
+                onChange={v => setRespField(field, v)}
+              />
+            </Space>
+          </Col>
+        ))}
+      </Row>
+    </Space>
+  )
   const llmList = providers.filter(p => p.kind === 'llm')
   const videoList = providers.filter(p => p.kind === 'video')
   const imageList = providers.filter(p => p.kind === 'image')
@@ -255,7 +336,12 @@ export default function ProvidersPage() {
           getFormApi={api => (formApiRef.current = api)}
           initValues={form}
           labelPosition="top"
-          onValueChange={values => setForm(f => ({ ...f, ...values, models: f.models }))}
+          // models / paths / response_map 由 Form 之外的受控组件维护:Form 持有的是
+          // initValues 那一刻的旧值,不排除就会在任意字段变更时把它们覆盖回旧值
+          onValueChange={values => setForm(f => ({
+            ...f, ...values, models: f.models,
+            paths: f.paths, response_map: f.response_map,
+          }))}
         >
           <Row gutter={[16, 0]}>
             <Col xs={24} md={12}>
@@ -296,6 +382,14 @@ export default function ProvidersPage() {
             <Col span={24}>
               <Form.Switch field="enabled" label="启用" />
             </Col>
+          </Row>
+          <Row gutter={[0, 12]}>
+            <Col span={24}>
+              <Checkbox checked={accessOpen} onChange={e => setAccessOpen(!!e.target.checked)}>
+                自定义接入路径
+              </Checkbox>
+            </Col>
+            {accessOpen && <Col span={24}>{accessSection()}</Col>}
           </Row>
           <Row gutter={[0, 12]}>
             <Col span={24}>

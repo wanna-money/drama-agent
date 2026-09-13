@@ -74,13 +74,26 @@ class StorageService:
         return await asyncio.to_thread(self.list_project_images, project_id, image_type)
 
     async def download_file(self, url: str, dest_path: Path) -> str:
-        """Stream-download a remote file to dest_path, return local path string."""
-        async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                async with aiofiles.open(dest_path, "wb") as f:
-                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
-                        await f.write(chunk)
+        """流式下载到 dest_path,**原子落地**(先写临时文件,完成后 rename)。
+
+        直接往 dest_path 写会让文件一创建就 exists() 为真而内容尚未写完:下载端点据
+        exists() 放行,前端取到截断的 mp4(moov atom 不完整)→ 播放器报"加载失败"(实测)。
+        中途失败时更糟 —— 目标路径上留着永久损坏的文件,且 exists() 恒为真,
+        重跑还会因"已存在"跳过它。
+        同目录内 rename 是原子的,故临时文件必须与目标同目录(跨设备 rename 会退化成拷贝)。
+        """
+        tmp_path = dest_path.with_name(f".{dest_path.name}.part")
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    async with aiofiles.open(tmp_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 64):
+                            await f.write(chunk)
+            tmp_path.replace(dest_path)   # 原子替换(目标已存在也可,支持重跑覆盖)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)   # 不在输出目录里留残骸
+            raise
         return str(dest_path)
 
     async def save_bytes(self, content: bytes, dest_path: Path) -> str:

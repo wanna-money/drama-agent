@@ -12,20 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from drama_agent.db.session import get_db
 from drama_agent.db.models import Project
 from drama_agent.db.enums import AdaptationStatus, JobKind
-from drama_agent.services import adaptation_service, job_service
-from drama_agent.services.adaptation_service import MAX_DRAFT_EPISODES
+from drama_agent.services import adaptation_service, job_service, script_service
 
 router = APIRouter(prefix="/api/projects", tags=["adaptation"])
-
-
-class DraftItem(BaseModel):
-    index: int
-    title: str
-    screenplay: str
-
-
-class SaveDraftRequest(BaseModel):
-    draft: list[DraftItem]
 
 
 class CommitRequest(BaseModel):
@@ -51,14 +40,18 @@ async def start_adaptation(project_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=422, detail="该作品没有小说正文,无法改编")
     if bool(p.target_episodes) == bool(p.target_seconds_per_episode):
         raise HTTPException(status_code=422, detail="切分依据须二选一:集数 或 每集时长")
-    if p.adaptation_status == AdaptationStatus.ADAPTING.value:
+    if p.adaptation_status in (AdaptationStatus.ANALYZING.value,
+                               AdaptationStatus.ADAPTING.value):
         raise HTTPException(status_code=409, detail="改编正在进行中")
-    if p.adaptation_status == AdaptationStatus.COMMITTED.value:
-        raise HTTPException(status_code=409, detail="已按草稿建过集,不能重新改编")
+    if p.adaptation_status == AdaptationStatus.CAST_REVIEW.value:
+        raise HTTPException(status_code=409, detail="请先确认角色身份,再继续改编")
     # 先置状态再入队:enqueue 内部会 commit(job_service.py),那次 commit 会把这里改脏的
     # Project 和新 Job 一并刷下去 → 天然单事务。反过来写就是两个事务,中间崩溃会留下
     # 「队列里有 ADAPT job、作品却仍是 none」的错位(界面显示未改编,后台已在跑)。
-    p.adaptation_status = AdaptationStatus.ADAPTING.value
+    # 先抽角色(analyzing),确认后才进 adapting 切分 —— 角色必须在切分前确立,
+    # 否则各段自行发明称呼,同一角色跨集漂移(见 runner._run_adaptation)
+    p.adaptation_status = AdaptationStatus.ANALYZING.value
+    p.cast_pending = []
     # enqueue 对已终态的同 dedup_key job 会自动复位重跑(见 job_service.enqueue),
     # 覆盖"重新改编"场景,这里不用再手动复位。
     job = await job_service.enqueue(
@@ -66,64 +59,58 @@ async def start_adaptation(project_id: str, db: AsyncSession = Depends(get_db)):
     return {"job_id": job["id"], "adaptation_status": p.adaptation_status}
 
 
-def _adaptation_state(p: Project) -> dict:
-    """对外的改编态形状(唯一权威)。GET 与 PUT 都走这里 —— 两处各自拼 dict 迟早分叉,
-    而前端把 PUT 结果直接 setState,少一个键就会踩空(少 source_text 会让面板整块消失)。
+async def _adaptation_state(db: AsyncSession, p: Project) -> dict:
+    """对外的改编态形状(唯一权威)。
+
+    scripts 是切分产出的**实际去处**(剧本库),不再有 adapted_draft 那样的中间草稿 ——
+    面板据此展示切出了哪些剧本,编辑则去剧本详情页。
     """
     return {
         "adaptation_status": p.adaptation_status,
-        "adapted_draft": p.adapted_draft or [],
         "source_text": p.source_text or "",
         "target_episodes": p.target_episodes,
         "target_seconds_per_episode": p.target_seconds_per_episode,
+        "scripts": await script_service.list_scripts(db, project_id=p.id),
+        # 非空即表示停在角色确认卡点(前端据此渲染确认面板)
+        "cast_pending": p.cast_pending or [],
     }
 
 
 @router.get("/{project_id}/adaptation")
 async def get_adaptation(project_id: str, db: AsyncSession = Depends(get_db)):
-    return _adaptation_state(await _get_project(db, project_id))
-
-
-@router.put("/{project_id}/adaptation/draft")
-async def put_draft(project_id: str, req: SaveDraftRequest,
-                    db: AsyncSession = Depends(get_db)):
     p = await _get_project(db, project_id)
-    # 入参校验是这里的**实质防线**:save_draft 会规整草稿并丢弃没有正文的段,
-    # 放行畸形入参 = 用户草稿被静默规整成空、接口却回 200。
-    if not req.draft:
-        raise HTTPException(status_code=422, detail="分集草稿不能为空")
-    if any(not i.screenplay.strip() for i in req.draft):
-        raise HTTPException(status_code=422, detail="每集都必须有剧本正文")
-    # 上限沿用规整逻辑的 MAX_DRAFT_EPISODES(不在这里另写字面量,免得两处分叉)。
-    # 放行 = 规整时被 `raw[:MAX]` 悄悄截断,用户多出来的集丢了却还回 200。
-    if len(req.draft) > MAX_DRAFT_EPISODES:
-        raise HTTPException(
-            status_code=422, detail=f"分集数量超出上限({MAX_DRAFT_EPISODES} 集)")
-    saved = await adaptation_service.save_draft(
-        db, project_id, [i.model_dump() for i in req.draft])
-    if saved is None:
-        raise HTTPException(status_code=409, detail="当前状态不可编辑分集草稿")
-    # 兜底哨兵:上面的入参校验保证规整不丢段,故正常不可达。留着是为了规整规则日后
-    # 变化时**能被发现**而非静默清空(注意 save_draft 已落库,这里只报错不能回滚)。
-    if not saved["adapted_draft"]:
-        raise HTTPException(status_code=422, detail="分集草稿无有效内容")
-    # 回 GET 的全形状(而非 save_draft 的 service 层两字段返回)—— 前端拿 PUT 结果直接
-    # setState。p 与 save_draft 用的是同一 session,commit 后已是最新值。
-    return _adaptation_state(p)
+    return await _adaptation_state(db, p)
+
+
+class ConfirmCastRequest(BaseModel):
+    """角色名 → {action: link|create, character_id?}。未给决策的名字按新建处理。"""
+    cast: dict[str, dict[str, str]] = {}
+
+
+@router.post("/{project_id}/adaptation/confirm-cast")
+async def confirm_cast(project_id: str, req: ConfirmCastRequest,
+                       db: AsyncSession = Depends(get_db)):
+    """确认整本小说的角色身份,随后继续切分。
+
+    确认与继续切分必须一起完成:只落身份不重新入队,作品会停在 adapting 却没有任务在跑。
+    """
+    await _get_project(db, project_id)
+    result = await adaptation_service.confirm_cast(db, project_id, req.cast)
+    if result is None:
+        raise HTTPException(status_code=409, detail="当前状态不需要确认角色")
+    # 复用同一 dedup_key:enqueue 对已终态的同 key job 会复位重跑(见 job_service.enqueue),
+    # 于是 worker 再跑一次 _run_adaptation,这次因状态已是 adapting 而直接进切分。
+    job = await job_service.enqueue(
+        db, JobKind.ADAPT, project_id, dedup_key="adapt", project_id=project_id)
+    return {**result, "job_id": job["id"]}
 
 
 @router.post("/{project_id}/adaptation/commit")
 async def commit_adaptation(project_id: str, req: CommitRequest,
                             db: AsyncSession = Depends(get_db)):
     p = await _get_project(db, project_id)
-    if p.adaptation_status != AdaptationStatus.DRAFT_READY.value:
+    if p.adaptation_status != AdaptationStatus.DONE.value:
         raise HTTPException(status_code=409, detail="当前状态不可建集")
-    # 空草稿必须拦在这里:放行会「建 0 集却置 committed」,而 committed 既不能再建集
-    # 也不能重新改编 → 作品零集且无路可走,只能删库重建。
-    if not p.adapted_draft:
-        raise HTTPException(status_code=422, detail="分集草稿为空,无法建集")
-    if any(not str((i or {}).get("screenplay", "")).strip() for i in p.adapted_draft):
-        raise HTTPException(status_code=422, detail="草稿中存在没有正文的分集")
     from drama_agent import provider as provider_pkg
     dm = provider_pkg.provider_registry.effective_default("llm")
     vm = provider_pkg.provider_registry.effective_default("video")
@@ -140,5 +127,6 @@ async def commit_adaptation(project_id: str, req: CommitRequest,
         # 映射成 409 而非裸 500:commit 是整体回滚的,重试即可(规范 6 的错误映射)。
         raise HTTPException(status_code=409, detail="集号冲突,请重试建集") from exc
     if created is None:
-        raise HTTPException(status_code=409, detail="当前状态不可建集")
-    return {"episodes": created, "adaptation_status": AdaptationStatus.COMMITTED.value}
+        raise HTTPException(status_code=409, detail="没有可建集的剧本")
+    # 状态仍是 done:剧本还在剧本库里,可以再建一次集(比如加拍一集),不是一次性的
+    return {"episodes": created, "adaptation_status": p.adaptation_status}

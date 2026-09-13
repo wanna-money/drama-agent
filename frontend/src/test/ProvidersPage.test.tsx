@@ -50,7 +50,18 @@ describe('ProvidersPage', () => {
     vi.clearAllMocks()
     vi.mocked(providersApi.list).mockResolvedValue([builtinKimi, customCorp, builtinSeed, builtinGptImage] as any)
     vi.mocked(providersApi.protocols).mockResolvedValue({
-      llm: ['openai-compat'], video: ['seedance', 'minimax'], image: ['openai-image', 'doubao-image'],
+      llm: ['openai-compat'], video: ['seedance', 'minimax'], image: ['openai-image', 'doubao-image'], storage: ['cos'],
+      ops: {
+        'openai-compat': { chat: '/chat/completions' },
+        seedance: {
+          video_submit: '/contents/generations/tasks',
+          video_query: '/contents/generations/tasks/{task_id}',
+        },
+      },
+      response_fields: {
+        task_id: '提交响应里的任务 id', status: '查询响应里的状态字段',
+        video_url: '成片地址', status_succeeded: '该网关表示「成功」的状态词',
+      },
     })
   })
 
@@ -177,5 +188,87 @@ describe('ProvidersPage', () => {
     }] as any)
     renderPage()
     await waitFor(() => expect(screen.getByText('默认')).toBeInTheDocument())
+  })
+
+  // ── 自定义接入路径 ──────────────────────────────────────────────
+  const openNewVideoProvider = async () => {
+    vi.mocked(providersApi.list).mockResolvedValue([])
+    renderPage()
+    await waitFor(() => screen.getByText('新增 Provider'))
+    fireEvent.click(screen.getByText('新增 Provider'))
+    await waitFor(() => screen.getByText('自定义接入路径'))
+  }
+
+  it('自定义接入路径默认关闭,不显示路径输入框', async () => {
+    await openNewVideoProvider()
+    expect(screen.queryByText('video_submit')).not.toBeInTheDocument()
+  })
+
+  it('打开开关后按 protocol 的功能键渲染输入框,placeholder 是官方默认路径', async () => {
+    await openNewVideoProvider()
+    fireEvent.click(screen.getByText('自定义接入路径').closest('label')!
+      .querySelector('input')!)
+    // 新建默认是 llm/openai-compat → 只该出现 chat 这一个键
+    await waitFor(() => expect(screen.getByText('chat')).toBeInTheDocument())
+    expect(screen.getByPlaceholderText('/chat/completions')).toBeInTheDocument()
+    expect(screen.queryByText('video_submit')).not.toBeInTheDocument()
+  })
+
+  it('保存时把填写的路径与响应映射一并提交', async () => {
+    vi.mocked(providersApi.create).mockResolvedValue({} as any)
+    await openNewVideoProvider()
+    fireEvent.click(screen.getByText('自定义接入路径').closest('label')!
+      .querySelector('input')!)
+    await waitFor(() => screen.getByPlaceholderText('/chat/completions'))
+    fireEvent.change(screen.getByPlaceholderText('/chat/completions'),
+      { target: { value: '/task/submit' } })
+    fireEvent.change(screen.getByPlaceholderText('如 mycorp'), { target: { value: 'gw' } })
+    fireEvent.change(screen.getByPlaceholderText('如 私有部署'), { target: { value: '网关' } })
+    fireEvent.change(screen.getByPlaceholderText(/模型 ID/), { target: { value: 'M' } })
+    fireEvent.change(screen.getByPlaceholderText('显示名'), { target: { value: 'M' } })
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => expect(providersApi.create).toHaveBeenCalled())
+    const arg = vi.mocked(providersApi.create).mock.calls[0][0]
+    expect(arg.paths).toEqual({ chat: '/task/submit' })
+  })
+
+  it('留空的路径不提交(空串会被后端当成非法路径拒掉)', async () => {
+    vi.mocked(providersApi.create).mockResolvedValue({} as any)
+    await openNewVideoProvider()
+    fireEvent.click(screen.getByText('自定义接入路径').closest('label')!
+      .querySelector('input')!)
+    await waitFor(() => screen.getByPlaceholderText('/chat/completions'))
+    fireEvent.change(screen.getByPlaceholderText('如 mycorp'), { target: { value: 'gw' } })
+    fireEvent.change(screen.getByPlaceholderText('如 私有部署'), { target: { value: '网关' } })
+    fireEvent.change(screen.getByPlaceholderText(/模型 ID/), { target: { value: 'M' } })
+    fireEvent.change(screen.getByPlaceholderText('显示名'), { target: { value: 'M' } })
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => expect(providersApi.create).toHaveBeenCalled())
+    expect(vi.mocked(providersApi.create).mock.calls[0][0].paths).toEqual({})
+  })
+
+  it('编辑已配路径的 provider 时开关自动打开并回填', async () => {
+    vi.mocked(providersApi.list).mockResolvedValue([{
+      provider_id: 'cloud', label: '网关', kind: 'video', protocol: 'seedance',
+      base_url: 'http://gw/v1', api_key: '***abcd',
+      models: [{ id: 'M', label: 'M', kind: 'video' }],
+      paths: { video_submit: '/task/submit' },
+      response_map: { status_succeeded: 'success' },
+      builtin: false, enabled: true,
+    }] as any)
+    vi.mocked(providersApi.get).mockResolvedValue({
+      provider_id: 'cloud', label: '网关', kind: 'video', protocol: 'seedance',
+      base_url: 'http://gw/v1', api_key: 'pk-x',
+      models: [{ id: 'M', label: 'M', kind: 'video' }],
+      paths: { video_submit: '/task/submit' },
+      response_map: { status_succeeded: 'success' },
+      builtin: false, enabled: true,
+    } as any)
+    renderPage()
+    await waitFor(() => screen.getByText('编辑'))
+    fireEvent.click(screen.getByText('编辑'))
+    // 已有声明 → 开关处于打开态,路径值回填(否则用户一保存就把配置清空了)
+    await waitFor(() => expect(screen.getByDisplayValue('/task/submit')).toBeInTheDocument())
+    expect(screen.getByDisplayValue('success')).toBeInTheDocument()
   })
 })

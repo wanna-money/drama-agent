@@ -14,7 +14,15 @@ class ShotDict(TypedDict):
     shot_number: int
     shot_type: str           # ShotType enum value (workflow/constants.py)
     camera_movement: str     # CameraMovement enum value (workflow/constants.py)
+    # 光影是逐镜声明、而非交给模型每镜自由发挥:后者会让同一场戏的光线在镜间乱跳。
+    # 值域见 constants.Lighting / ColorTemp;prompt_engineer 查 *_PHRASE 表写进 prompt。
+    lighting: str
+    color_temp: str
     duration_seconds: int
+    # 镜内节拍(可选)。有它 = 这一镜由多个短促节拍(<下限秒,如击中/爆炸)合并而成,
+    # 自然语言按顺序描述各节拍占多久、发生什么;None = 单一连续动作,无需合并。
+    # 不结构化成 {seconds, action}——那还得再拼回自然语言,不如让 LLM 直接写。
+    beats: list[str] | None
     description: str
     characters: list[str]
     dialogue: str
@@ -43,6 +51,9 @@ class ReferenceDict(TypedDict):
     key: str                 # 场景地点(background);历史条目可能是角色名
     ref_type: str            # ReferenceType enum value (db/enums.py)
     image_url: str           # 空串 = 已列出但尚未上传(占位)
+    # 生成该图用的 prompt(从分镜提炼后可人工改)。必须存下来:背景图很少一次满意,
+    # 重生成时用户要改的正是它 —— 不存则每次重新提炼的结果都不同,用户无从迭代。
+    prompt: str
 
 class VideoDict(TypedDict):
     shot_id: str
@@ -70,9 +81,13 @@ class DramaState(TypedDict):
     episode_id: str          # 本集 = LangGraph thread 身份
     episode_number: int
     title: str
-    script_id: str | None    # 复用剧本来源(null = 从故事开始)
+    story_id: str | None     # 本集拍的那段原文(集的锚点;raw_input 取自它)
+    script_id: str | None    # 起始剧本方案(null = 从故事开始,方案由流水线产出)
     raw_input: str
     genre: str
+    # 作品级视觉风格(VisualStyle 枚举值)。只有 project 一层来源,没有 story/script
+    # 级覆盖 —— 与 genre 的四跳兜底链不同,直接查 Project.visual_style 即可。
+    visual_style: str
 
     story_analysis: StoryAnalysis | None
 
@@ -115,4 +130,5 @@ class DramaState(TypedDict):
     video_model: str
     video_provider: str
     resolution: str
+    aspect_ratio: str
     assembled_video_path: str | None

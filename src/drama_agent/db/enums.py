@@ -14,15 +14,33 @@ class JobKind(str, Enum):
     START = "start"
     RESUME = "resume"
     ADAPT = "adapt"          # 作品级:小说改编+分集切分(job 的 episode_id 列载 project_id)
+    CLIP = "clip"            # 散片直接生成(job 的 episode_id 列载 clip_id)
+
+
+class ClipTaskType(str, Enum):
+    """散片的任务类型(Seedance 2.5 的 omni_reference_task_type)。
+
+    自由字符串会静默走成另一种任务:平台按提示词自行判定,与我们以为的不一致时
+    触发异步报错,而那时错误信息指向参数不兼容、与"我选了延长"对不上。
+    """
+
+    REFERENCE = "reference"   # 参考生视频:ratio / duration 无特殊限制
+    EDIT = "edit"             # 视频编辑:ratio 必须 adaptive、duration 必须 -1
+    EXTEND = "extend"         # 视频延长:ratio 必须 adaptive
 
 
 class AdaptationStatus(str, Enum):
-    """作品级改编阶段状态。与「各集聚合出的 Project 展示态」正交,互不覆盖。"""
+    """作品级改编阶段状态。与「各集聚合出的 Project 展示态」正交,互不覆盖。
+
+    切分产出直接落成剧本(Script),没有"草稿待确认"这个中间态 —— 剧本库就是内容的家,
+    切完即可在那里逐个编辑。故只有"没跑过 / 在跑 / 跑完 / 失败"四态。
+    """
     NONE = "none"
-    ADAPTING = "adapting"
-    DRAFT_READY = "draft_ready"
+    ANALYZING = "analyzing"        # 正在抽整本小说的角色
+    CAST_REVIEW = "cast_review"    # 等人工确认角色身份(切分前的唯一卡点)
+    ADAPTING = "adapting"          # 角色已定,正在切分
+    DONE = "done"
     FAILED = "failed"
-    COMMITTED = "committed"
 
 
 class JobStatus(str, Enum):
@@ -103,6 +121,27 @@ GENRE_LABELS: dict[str, str] = {
     Genre.COMEDY.value: "喜剧",
     Genre.ACTION.value: "动作",
     Genre.FANTASY.value: "奇幻",
+}
+
+
+class VisualStyle(str, Enum):
+    """作品级视觉风格(固定枚举)。建作品时必填,决定视频/图像生成的画面基调 ——
+    与 Genre 同构:取值固定,不接受自由文本,避免不同集各自"翻译"出不一致的措辞。"""
+    ANIME = "anime"              # 日系动漫风
+    GUOMAN = "guoman"            # 国漫风
+    REALISTIC = "realistic"      # 写实风
+    INK = "ink"                  # 水墨风
+    CYBERPUNK = "cyberpunk"      # 赛博朋克风
+    RETRO_ANIME = "retro_anime"  # 复古动画风
+
+
+VISUAL_STYLE_LABELS: dict[str, str] = {
+    VisualStyle.ANIME.value: "日系动漫风",
+    VisualStyle.GUOMAN.value: "国漫风",
+    VisualStyle.REALISTIC.value: "写实风",
+    VisualStyle.INK.value: "水墨风",
+    VisualStyle.CYBERPUNK.value: "赛博朋克风",
+    VisualStyle.RETRO_ANIME.value: "复古动画风",
 }
 
 

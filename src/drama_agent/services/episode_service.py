@@ -18,19 +18,47 @@ def _to_dict(row: Episode) -> dict:
         "project_id": row.project_id,
         "episode_number": row.episode_number,
         "title": row.title,
+        "story_id": row.story_id,
         "script_id": row.script_id,
-        "raw_input": row.raw_input,
+        "entry_mode_at_start": row.entry_mode_at_start,
         "target_seconds": row.target_seconds,
         "status": row.status,
         "llm_model": row.llm_model,
         "video_provider": row.video_provider,
         "video_model": row.video_model,
         "resolution": row.resolution,
+        "aspect_ratio": row.aspect_ratio,
         "state_snapshot": row.state_snapshot,
         "error_message": row.error_message,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+
+
+def seeded_screenplay(row: Episode) -> str:
+    """本集自带的剧本正文(改编切片建集时种入版本 0);没有则空串。"""
+    versions = row.screenplay_versions or []
+    if not versions:
+        return ""
+    return versions[row.screenplay_version_current or 0].get("screenplay", "") or ""
+
+
+def entry_mode(row: Episode, script_content: str | None) -> str:
+    """本集从哪儿起跑:"from_script"(已有正文 → 直达分镜)/ "from_story"(只有原文)。
+
+    判据是**开拍那一刻有没有正文**,不是有没有 script_id:有方案而方案正文为空时仍要跑
+    剧本步(正文正是流水线要产出的东西)。这是唯一权威(规范 4):runner 用它决定
+    screenplay_approved,status 端点用它决定流水线要不要展示剧本三步。两处各判一次必然
+    分叉:一边跑剧本步、另一边不显示它,或反之显示永远走不到的死步骤。
+
+    **它必须在整集生命周期内恒定**:若改看"当前有没有正文",从故事开跑的集在剧本产出后
+    就会翻转成 from_script,左栏的剧本四步在流程跑到一半时凭空消失(实测过)。
+    故已开拍的集一律以 entry_mode_at_start 记下的值为准,只有未开拍时才现算。
+    """
+    if row.entry_mode_at_start:
+        return row.entry_mode_at_start
+    has_text = bool(seeded_screenplay(row).strip() or (script_content or "").strip())
+    return "from_script" if has_text else "from_story"
 
 
 def aggregate_project_status(episode_statuses: list[str]) -> str:
@@ -50,17 +78,26 @@ def aggregate_project_status(episode_statuses: list[str]) -> str:
 
 
 async def create(
-    session: AsyncSession, *, project_id: str, title: str, script_id: str | None,
+    session: AsyncSession, *, project_id: str, title: str, story_id: str,
     llm_model: str, video_provider: str, video_model: str, resolution: str,
-    episode_number: int | None = None,
-    target_seconds: int = 120, raw_input: str | None = None,
+    script_id: str | None = None,
+    aspect_ratio: str = "9:16", episode_number: int | None = None,
+    target_seconds: int = 120,
     use_keyframes: bool = False, keyframe_image_model: str = "",
     seed_screenplay: str | None = None, autocommit: bool = True,
 ) -> dict:
-    """建一集。script_id 传了=复用剧本;不传=从故事(raw_input)开始。
+    """建一集。**story_id 必填**:集是一次制作运行,输入是原文。
+
+    script_id 可空,只记"起始剧本方案是哪个"(溯源);从一段故事开跑时没有方案。
+    有正文 → 图内直达分镜;只有原文 → 从故事分析起跑(见 runner._build_initial_state)。
     episode_number 不传则自动取 project 下 max+1。
     seed_screenplay 传了(改编切片)则直接种为该集初始剧本版本 0。
-    autocommit=False 时只 flush,由调用方统一 commit(批量建集要"全成或全不成")。"""
+    autocommit=False 时只 flush,由调用方统一 commit(批量建集要"全成或全不成")。
+    """
+    if not (story_id or "").strip():
+        # 业务必填,在此强制(DB 上可空只为兼容旧行)。没有原文的集跑不起来:
+        # 分析/阵容/原文都从 Story 取,缺了它流水线第一步就没有输入。
+        raise ValueError("story_id 不能为空:集必须绑定一段原文")
     if episode_number is None:
         current_max = (await session.execute(
             select(func.coalesce(func.max(Episode.episode_number), 0))
@@ -69,10 +106,10 @@ async def create(
         episode_number = current_max + 1
     row = Episode(
         id=str(uuid.uuid4()), project_id=project_id, episode_number=episode_number,
-        title=title, script_id=script_id, raw_input=raw_input,
+        title=title, story_id=story_id, script_id=script_id,
         target_seconds=target_seconds, status=LifecycleStatus.CREATED.value,
         llm_model=llm_model, video_provider=video_provider,
-        video_model=video_model, resolution=resolution,
+        video_model=video_model, resolution=resolution, aspect_ratio=aspect_ratio,
         use_keyframes=use_keyframes, keyframe_image_model=keyframe_image_model,
         screenplay_versions=(
             [{"screenplay": seed_screenplay, "label": "分集剧本",

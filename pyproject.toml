@@ -28,6 +28,11 @@ dependencies = [
     "structlog>=24.0",
     "greenlet>=3.5.0",
     "mutagen>=1.47",
+    # 对话附件抽文本(助手读 PDF / Word)
+    "pypdf>=5.0",
+    "python-docx>=1.1",
+    # 公网对象存储(视频参考只接受公网 URL,没有 base64 这条路)
+    "cos-python-sdk-v5>=1.9",
 ]
 
 [project.optional-dependencies]

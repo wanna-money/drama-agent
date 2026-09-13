@@ -279,7 +279,10 @@ describe('AssetsPage', () => {
     ))
   })
 
-  it('optimizing a non-character asset omits subject', async () => {
+  // 四类都有各自的"锁死项"(后端 _SUBJECT_BLOCKS):背景不许出现人物、道具不许带手…
+  // 只对 character 传 subject 会让另外三类拿不到专项约束,生成出无法复用的素材。
+  // (此前这里断言的是"非人物不传 subject",那是只有人物有专项要求时的旧结论。)
+  it('优化非人物素材时也带上该分类,以拿到专项约束', async () => {
     const propAsset = { ...asset, id: 'a-2', category: 'prop' as const, name: '道具-手机' }
     vi.mocked(assetsApi.list).mockResolvedValue([propAsset])
     vi.mocked(configApi.listImageModels).mockResolvedValue({
@@ -295,6 +298,6 @@ describe('AssetsPage', () => {
     fireEvent.click(screen.getByText('✨ 优化描述'))
 
     await waitFor(() => expect(promptApi.optimize).toHaveBeenCalled())
-    expect(vi.mocked(promptApi.optimize).mock.calls[0][0].subject).toBeUndefined()
+    expect(vi.mocked(promptApi.optimize).mock.calls[0][0].subject).toBe('prop')
   })
 })

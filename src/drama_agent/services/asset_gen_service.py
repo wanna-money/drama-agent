@@ -7,15 +7,22 @@ from __future__ import annotations
 
 from drama_agent.provider.image.protocols import get_image_protocol
 from drama_agent.services import usage_service
+from drama_agent.workflow.constants import VISUAL_STYLE_PHRASE
 
 
 async def generate_image(
-    model_id: str, prompt: str, *, size: str | None = None, n: int = 1
+    model_id: str, prompt: str, *, size: str | None = None, n: int = 1,
+    visual_style: str = "",
 ) -> list[bytes]:
+    """visual_style 非空时把风格短语拼进 prompt 末尾——仅调用方传了才拼(全局素材库场景
+    不传,保持风格无关的现状不变);调用方决定要不要传,本函数不判断"这是不是全局调用"。
+    """
     from drama_agent import provider as provider_pkg
     provider, model = provider_pkg.provider_registry.resolve_model(model_id)  # ValueError 未知 model
     proto = get_image_protocol(provider.protocol)                            # ValueError 未知 protocol
-    result = await proto.generate(provider, model, prompt, size=size, n=n)   # NotImplementedError 可能
+    style_phrase = VISUAL_STYLE_PHRASE.get(visual_style, "")
+    final_prompt = f"{prompt}。整体视觉风格:{style_phrase}。" if style_phrase else prompt
+    result = await proto.generate(provider, model, final_prompt, size=size, n=n)  # NotImplementedError 可能
     await usage_service.record_image(
         getattr(result, "usage", None) or {}, provider=provider.id, model=model.id
     )

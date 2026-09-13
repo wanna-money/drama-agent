@@ -20,6 +20,22 @@ def _audio_of(artifact: dict) -> list[RefAudio]:
     return [RefAudio(**a) for a in (artifact.get("audio_refs_json") or [])]
 
 
+def _replay_kwargs(artifact: dict) -> dict:
+    """重放这次生成所需的入参(只带产物上真有的):比例、负向提示、seed。
+
+    比例缺省时不传,让 provider 用自己的默认 —— 硬塞一个会把旧产物(那时还没有该列)
+    重跑成另一种画面比例。
+    """
+    out: dict = {}
+    if artifact.get("aspect_ratio"):
+        out["ratio"] = artifact["aspect_ratio"]
+    if artifact.get("negative_prompt"):
+        out["negative_prompt"] = artifact["negative_prompt"]
+    if artifact.get("seed") is not None:
+        out["seed"] = artifact["seed"]
+    return out
+
+
 def _video_model(provider_name: str):
     """按 video_provider 字符串(= registry 里的 video model id)解析出 Model;未知返回 None。"""
     try:
@@ -73,9 +89,11 @@ def _base_new(artifact: dict, action: str) -> dict:
         "provider": artifact["provider"],
         "model": artifact.get("model", ""),
         "resolution": artifact["resolution"],
+        "aspect_ratio": artifact.get("aspect_ratio") or "",
         "duration": artifact["duration"],
         "action": action,
         "prompt_text": artifact.get("prompt_text"),
+        "negative_prompt": artifact.get("negative_prompt"),
         "references_json": artifact.get("references_json"),
         "audio_refs_json": artifact.get("audio_refs_json"),
         "task_id": "",
@@ -85,6 +103,11 @@ def _base_new(artifact: dict, action: str) -> dict:
 
 
 async def _rerun_execute(artifact: dict, params: dict) -> dict:
+    """原样重放这次生成:同 prompt / 参考图 / 比例 / 负向提示,并带上原 seed。
+
+    不带 seed 的重跑只是"再抽一次"(出来必然是另一支视频)。seed 由平台在首次生成时回传
+    并落库;provider 不支持 seed 时它为 None,此处照旧不传 —— 那种模型上"重跑"本就无法复现。
+    """
     from drama_agent.services.ref_delivery import inline_local_refs
     provider = video_service.get_provider(artifact["provider"])
     sent_refs, sent_audio = await inline_local_refs(_refs_of(artifact), _audio_of(artifact))
@@ -92,30 +115,37 @@ async def _rerun_execute(artifact: dict, params: dict) -> dict:
         prompt=artifact.get("prompt_text") or "",
         duration=artifact["duration"],
         resolution=artifact["resolution"],
+        **_replay_kwargs(artifact),
         references=sent_refs or None,
         audio_refs=sent_audio or None,
     )
     result = await provider.wait_for_task(task_id)
     new = _base_new(artifact, "rerun")
-    new.update(task_id=task_id, video_url=result.video_url)
+    new.update(task_id=task_id, video_url=result.video_url,
+               seed=result.seed, revised_prompt=result.revised_prompt)
     return new
 
 
 async def _regenerate_execute(artifact: dict, params: dict) -> dict:
+    """改参数重生:**不带 seed** —— 用户改了参数就是要一个不一样的结果,
+    固定 seed 会让部分改动看不出变化。比例/负向提示仍沿用父产物(用户没要求改它们)。"""
     from drama_agent.services.ref_delivery import inline_local_refs
     provider = video_service.get_provider(artifact["provider"])
     resolution = params.get("resolution", artifact["resolution"])
     duration = int(params.get("duration", artifact["duration"]))
     prompt = params.get("prompt") or artifact.get("prompt_text") or ""
     sent_refs, sent_audio = await inline_local_refs(_refs_of(artifact), _audio_of(artifact))
+    kwargs = _replay_kwargs(artifact)
+    kwargs.pop("seed", None)
     task_id = await provider.create_task(
-        prompt=prompt, duration=duration, resolution=resolution,
+        prompt=prompt, duration=duration, resolution=resolution, **kwargs,
         references=sent_refs or None, audio_refs=sent_audio or None)
     result = await provider.wait_for_task(task_id)
     new = _base_new(artifact, "regenerate")
     new.update(
         task_id=task_id, video_url=result.video_url,
         resolution=resolution, duration=duration, prompt_text=prompt,
+        seed=result.seed, revised_prompt=result.revised_prompt,
     )
     return new
 

@@ -50,22 +50,56 @@ def appearance_of(story_analysis: Mapping[str, Any] | None, name: str) -> str:
 
 
 async def roster_names(project_id: str, state_cast: Mapping[str, str] | None = None) -> list[str]:
-    """下游创作节点可用的角色名单 = 作品角色库 ∪ 本集 cast 的键。
+    """下游创作节点可用的角色名单。**一个身份只出一个名字**。
 
-    **以角色库为准、不只依赖 state["cast"]**:cast 由 cast_review 写入状态,而下游节点
+    以角色库为准、不只依赖 state["cast"]:cast 由 cast_review 写入状态,而下游节点
     (写剧本/分镜)读到它要跨 interrupt 恢复的状态合并边界,时序上不可靠;角色库是
-    作品级的持久权威,任何时刻查都对。两者取并集:库覆盖全部已建角色,state 覆盖
-    本次刚确认、极端情况下库读失败时仍能兜住。
+    作品级的持久权威,任何时刻查都对。
+
+    **别名要折叠**:用户把「程序员」link 到已有角色「角色1」时,cast 是
+    {"程序员": <角色1 的 id>} —— 若把 cast 的键与库里的 name 简单取并集,同一身份
+    就出两个名字下发给 LLM,它会当成两个人各自分配镜头,而过滤器因两者都"在名单上"
+    照样放行(实测:19 镜「程序员」+ 5 镜「角色1」,实为一人)。故 cast 的键只在它
+    没有对应到任何库内角色时才补进名单;能对应上的一律用库里的规范名。
 
     库读不到时退回 state 的键(而非空):空名单会让下游的约束段整体消失。
     """
-    names: set[str] = {str(k) for k in (state_cast or {}) if str(k or "").strip()}
+    cast = {str(k): str(v) for k, v in (state_cast or {}).items() if str(k or "").strip()}
     try:
         from drama_agent.services import character_entity_service as ce
-        names |= {r.name for r in await ce.list_characters(project_id) if r.name}
+        rows = [r for r in await ce.list_characters(project_id) if r.name]
     except Exception as e:  # noqa: BLE001 — 库读不到就只用 state 的键
         logger.warning("roster lookup failed, falling back to state cast", error=str(e))
+        return sorted(cast)
+    known_ids = {r.id for r in rows}
+    names = {r.name for r in rows}
+    # 只补"指向库外(或无 id)"的 cast 键:它们在库里没有规范名可用
+    names |= {k for k, cid in cast.items() if cid not in known_ids}
     return sorted(names)
+
+
+async def roster_by_id(project_id: str) -> dict[str, str]:
+    """{character_id: 规范名}。读不到时返回空(调用方据此跳过归一,不阻断)。"""
+    try:
+        from drama_agent.services import character_entity_service as ce
+        return {r.id: r.name for r in await ce.list_characters(project_id) if r.name}
+    except Exception as e:  # noqa: BLE001 — 归一是纠偏,读不到就不归一
+        logger.warning("roster_by_id failed", error=str(e))
+        return {}
+
+
+def canonical_cast(
+    state_cast: Mapping[str, str] | None, roster: Mapping[str, str] | None
+) -> dict[str, str]:
+    """把 cast 的键换成角色库里的规范名(别名 → 规范名)。
+
+    roster: {character_id: 规范名}。下游按名字查 cast 取 character_id,而分镜里用的是
+    规范名 —— 不换键会让规范名查不到 id,该角色的造型/外貌整段丢失。
+    """
+    out: dict[str, str] = {}
+    for name, cid in (state_cast or {}).items():
+        out[(roster or {}).get(cid) or name] = cid
+    return out
 
 
 async def resolve(project_id: str, story_analysis: Mapping[str, Any] | None) -> dict:
@@ -147,8 +181,10 @@ async def apply_decisions(
             await _backfill_appearance(cid, appearance_of(story_analysis, name))
             continue
         try:
+            # appearance 必须走关键字:第三个位置参数是 description(人手写备注),
+            # 传错列会让 AI 抽的外貌进不到 get_appearance 读的那一列,下游 prompt 拿不到。
             row = await ce.create_character(
-                project_id, name, appearance_of(story_analysis, name) or None)
+                project_id, name, appearance=appearance_of(story_analysis, name) or None)
             cast[name] = row.id
         except Exception as e:  # noqa: BLE001 — 单个角色建不出来不阻断其余
             logger.warning("cast create failed", name=name, error=str(e))

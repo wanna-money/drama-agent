@@ -1,3 +1,7 @@
+import base64
+import binascii
+import uuid
+
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -5,12 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pathlib import Path
 from drama_agent.db.session import get_db
-from drama_agent.db.models import Project, Episode, Script
+from drama_agent.db.models import Project, Episode
 from drama_agent.db.enums import (
     ImageType, LifecycleStatus, SERVABLE_IMAGE_TYPES, UPLOADABLE_IMAGE_TYPES,
 )
 from drama_agent.services import reference_service
 from drama_agent.services.storage_service import storage_service
+from drama_agent.services.public_storage import (
+    PublicStorageUnavailable,
+    get_public_storage,
+)
+from drama_agent.services.video_validate import validate_video, video_mime
 
 # 图片(角色/背景参考图)按项目共享 → project 级路由
 img_router = APIRouter(prefix="/api/projects", tags=["files"])
@@ -68,6 +77,33 @@ class FromAssetRequest(BaseModel):
     type: str = "reference"
 
 
+class FromBase64Request(BaseModel):
+    """AI 生成的图落进项目参考目录。生成结果是 base64 在手,没有 File 可 multipart 上传。"""
+    image_b64: str
+    type: str = "reference"
+    filename: str = "generated.png"
+
+
+@img_router.post("/{project_id}/files/from-base64")
+async def save_from_base64(
+    project_id: str, req: FromBase64Request, db: AsyncSession = Depends(get_db)
+):
+    """把 base64 图片存进本项目参考目录。返回与 upload 同形状,前端走既有绑定流程。"""
+    await _get_project_or_404(db, project_id)
+    try:
+        content = base64.b64decode(req.image_b64, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=422, detail="image_b64 非法")
+    if not content:
+        raise HTTPException(status_code=422, detail="image_b64 为空")
+    image_type = req.type if req.type in UPLOADABLE_IMAGE_TYPES else ImageType.REFERENCE.value
+    unique_name, _ = await storage_service.save_project_image(
+        project_id, content, req.filename or "generated.png", image_type
+    )
+    url = f"/api/projects/{project_id}/images/{image_type}/{unique_name}"
+    return {"path": unique_name, "filename": unique_name, "url": url, "type": image_type}
+
+
 @img_router.post("/{project_id}/files/from-asset")
 async def copy_from_asset(
     project_id: str, req: FromAssetRequest, db: AsyncSession = Depends(get_db)
@@ -89,6 +125,63 @@ async def copy_from_asset(
     )
     url = f"/api/projects/{project_id}/images/{image_type}/{unique_name}"
     return {"path": unique_name, "filename": unique_name, "url": url, "type": image_type}
+
+
+@img_router.post("/{project_id}/videos/upload")
+async def upload_reference_video(
+    project_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)
+):
+    """上传参考视频:存本地 + 传公网。
+
+    **两份都要**:本地那份是长期可播的(平台直链 24 小时就失效),公网那份是给
+    平台取的(视频参考只接受公网 URL,没有 base64 那条路)。只留一份的话,
+    要么预览依赖外网,要么平台取不到。
+    """
+    await _get_project_or_404(db, project_id)
+    content = await file.read()
+    try:
+        info = validate_video(content, file.filename or "")
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
+    try:
+        storage = get_public_storage()
+    except PublicStorageUnavailable as e:
+        # 409 而非 500:这是"还没配置",用户能自己解决 —— 500 只会让人以为是故障
+        raise HTTPException(
+            409, f"上传参考视频需要先配置对象存储(存储管理):{e}") from None
+
+    out_dir = storage_service.get_project_output_dir(project_id, "refvideos")
+    local_name = f"{uuid.uuid4()}{Path(file.filename or 'a.mp4').suffix.lower()}"
+    local_path = out_dir / local_name
+    await storage_service.save_bytes(content, local_path)
+    key = await storage.put(content, file.filename or "a.mp4")
+
+    return {
+        "storage_key": key,
+        # 可直接取用的预览地址(相对 URL,前端拼在同源下)。
+        # 不回服务器文件系统路径 —— 前端取不到,且泄露目录结构。
+        "preview_url": f"/api/projects/{project_id}/videos/{local_name}/file",
+        "duration": info["duration"],
+        "warning": info["warning"],
+    }
+
+
+@img_router.get("/{project_id}/videos/{filename}/file")
+async def serve_reference_video(
+    project_id: str, filename: str, db: AsyncSession = Depends(get_db)
+):
+    """回上传的参考视频本体,供界面预览。
+
+    与 `clips/{clip_id}/file` 同一形态:平台直链是预签名、会到期,
+    本地落盘的这份才是长期可播的那份。
+    """
+    await _get_project_or_404(db, project_id)
+    out_dir = storage_service.get_project_output_dir(project_id, "refvideos")
+    path = _safe_path(out_dir, filename)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    return FileResponse(path, media_type=video_mime(filename), filename=filename)
 
 
 @img_router.get("/{project_id}/images")
@@ -124,6 +217,8 @@ class ReferenceEntry(BaseModel):
     key: str
     ref_type: str        # ReferenceType(character/background),非法值 → 400
     image_url: str = ""  # 空串 = 已列出但未上传
+    # 生成该图所用的 prompt(提炼后可人工改);重生成时改它而不是重新提炼
+    prompt: str = ""
     # 角色实体关联(Character.id)。前端原样回传后端下发的值,不自己造。
     character_id: str | None = None
 
@@ -150,12 +245,12 @@ async def _reference_source(db: AsyncSession, ep: Episode) -> dict:
                 )
         except Exception:  # noqa: BLE001 — checkpointer 不可用时退回快照,不该让面板整体挂掉
             pass
-    if not source.get("story_analysis") and ep.script_id:
-        sc = (await db.execute(
-            select(Script).where(Script.id == ep.script_id)
-        )).scalar_one_or_none()
-        if sc and sc.story_analysis:
-            source["story_analysis"] = sc.story_analysis
+    if not source.get("story_analysis") and ep.story_id:
+        # 分析住在 Story 上(权威);经集的锚点直取,不绕 Script
+        from drama_agent.services import story_service
+        story = await story_service.row_of(db, ep.story_id)
+        if story and story.story_analysis:
+            source["story_analysis"] = story.story_analysis
     return source
 
 

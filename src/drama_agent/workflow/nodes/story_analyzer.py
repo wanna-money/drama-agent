@@ -84,6 +84,13 @@ async def _known_characters(project_id: str) -> list[dict]:
 
 
 async def story_analyzer_node(state: DramaState) -> dict:
+    # 缺 project_id 说明本次是"空状态进图"(如对已消费的中断重发 Command(resume=...)),
+    # 不是数据问题。裸 KeyError 只会在日志里留下一个键名,看不出是哪种情况 ——
+    # 报错要能指向真正的原因(见 runner 里 resume 的幂等守卫)。
+    if not state.get("project_id"):
+        raise RuntimeError(
+            "图以空状态启动(缺 project_id):不要对已消费的中断重发 resume,"
+            "应经 runner._build_initial_state 构造初始状态")
     project_id = state["project_id"]
     # 已有角色作为硬约束下发。**不得在此建角色实体**:身份要由 cast_review 人工确认后
     # 才落库,否则 LLM 造的名字会直接变成实体,与用户手建的角色各自为政。

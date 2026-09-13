@@ -19,27 +19,41 @@ class PipelineStep:
 _STEPS: tuple[PipelineStep, ...] = (
     PipelineStep("analysis", "故事分析", ("starting", "analyzing", "story_analyzed")),
     PipelineStep("cast", "确认角色", ("cast_resolved", "cast_review", "cast_confirmed")),
-    PipelineStep("screenplay", "生成剧本", ("screenplay_written", "screenplay_revision_requested")),
-    PipelineStep("screenplay_review", "审核剧本", ("screenplay_review", "screenplay_approved")),
+    # 生成与审核同属一步(与 storyboard/looks/prompts 一致):审核的对象就是本步的产出,
+    # 拆成两步后两边右栏内容天然雷同 —— 只能靠"有没有审核按钮"区分,用户看不出差别。
+    # screenplay_review 是本步的人工卡点,必须在此列出,否则该阶段映射不出 current。
+    PipelineStep("screenplay", "剧本",
+                 ("screenplay_written", "screenplay_review",
+                  "screenplay_revision_requested", "screenplay_approved")),
+    # storyboard_review 是分镜步的人工卡点,必须归到本步:漏掉它 build_pipeline 就
+    # 映射不出 current,整条左栏看起来像未启动,审核按钮也无从渲染。
     PipelineStep("storyboard", "分镜",
-                 ("storyboard_start", "storyboard_ready", "storyboard_revision_requested")),
+                 ("storyboard_start", "storyboard_ready", "storyboard_review",
+                  "storyboard_approved", "storyboard_revision_requested")),
     PipelineStep("looks", "审核造型",
                  ("looks_assigned", "look_review", "looks_approved", "looks_revision_requested")),
     PipelineStep("prompts", "Prompt",
-                 ("prompts_ready", "prompts_review", "prompts_approved", "prompts_revision_requested")),
-    PipelineStep("video", "生成视频", ("videos_generated", "assembly_failed")),
+                 ("prompts_ready", "prompts_review", "prompts_revision_requested")),
+    # prompts_approved 归**视频步**:确认 Prompt 后图直接进 video_generator,而它要跑
+    # 十几分钟且中途不改 stage。把该阶段留在 Prompt 步上,这段时间左栏会一直高亮
+    # 「Prompt」—— 用户看不出视频正在生成(实测)。
+    # videos_generating 由节点在开跑前落一次,使"正在生成"有独立可观测的阶段。
+    PipelineStep("video", "生成视频",
+                 ("prompts_approved", "videos_generating", "videos_generated", "assembly_failed")),
     PipelineStep("done", "完成", ("completed",)),
 )
 
+# 开了关键帧时 prompts_approved 之后先跑关键帧,故该阶段改归本步(插入位置见 build_pipeline)。
 _KEYFRAME_STEP = PipelineStep(
     "keyframes", "关键帧",
-    ("keyframes_ready", "keyframes_review", "keyframes_approved", "keyframes_revision_requested"),
+    ("prompts_approved", "keyframes_ready", "keyframes_review", "keyframes_approved",
+     "keyframes_revision_requested"),
 )
 
 
 # from_script 模式(复用剧本/改编切片)图内直达分镜 —— 这几步都不跑,展示出来就是死步骤。
 # cast 也在其中:它是"剧本人物→角色身份"的确认,复用已有剧本时图根本不经过它。
-_SCREENPLAY_STEP_KEYS = frozenset({"analysis", "cast", "screenplay", "screenplay_review"})
+_SCREENPLAY_STEP_KEYS = frozenset({"analysis", "cast", "screenplay"})
 
 
 def build_pipeline(

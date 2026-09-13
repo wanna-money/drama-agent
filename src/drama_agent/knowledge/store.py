@@ -44,7 +44,12 @@ class ConstantKnowledgeStore:
         return []
 
 
-CRAFT_KINDS = {"shot_language", "story_structure", "visual_aesthetics", "image_prompt_guide"}
+CRAFT_KINDS = {"shot_language", "shot_sequence", "story_structure", "visual_aesthetics",
+               "image_prompt_guide", "story_text_guide",
+               "multi_character_blocking", "camera_movement_prompts",
+               "vfx_spell_prompt_guide", "lighting_prompt_guide",
+               "xianxia_combat_moves", "epic_manifestation_prompts",
+               "lens_language_prompts", "mythical_creature_battle_prompts"}
 
 
 def _read_craft(kind: str) -> str:

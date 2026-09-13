@@ -48,11 +48,22 @@ async def video_assembler_node(state: DramaState) -> dict:
         str(final_path),
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        # 环境没装 ffmpeg。裸抛 FileNotFoundError 会让 job 重试到耗尽、最后只留下
+        # "[Errno 2] No such file or directory" —— 那句话对用户毫无指向性,
+        # 而此时各分镜视频其实都已生成好,只差拼接这一步。
+        return {
+            "current_stage": "assembly_failed",
+            "error": "未找到 ffmpeg,无法合成成片。请安装后重试"
+                     "(macOS: brew install ffmpeg;Debian/Ubuntu: apt install ffmpeg)。"
+                     "各分镜视频已生成,安装后重跑这一步即可。",
+        }
     stdout, stderr = await proc.communicate()
 
     if proc.returncode != 0:

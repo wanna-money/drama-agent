@@ -16,11 +16,14 @@ from drama_agent.api.files import router as files_router, img_router as files_im
 from drama_agent.api.config_api import router as config_router
 from drama_agent.api.providers import router as providers_router
 from drama_agent.api.artifacts import router as artifacts_router
+from drama_agent.api.clips import router as clips_router
 from drama_agent.api.assets import router as assets_router
 from drama_agent.api.characters import router as characters_router
 from drama_agent.api.prompt import router as prompt_router
 from drama_agent.api.scripts import router as scripts_router
+from drama_agent.api.stories import router as stories_router
 from drama_agent.api.adaptation import router as adaptation_router
+from drama_agent.api.story_text import router as story_text_router
 from drama_agent.api.websocket import manager, backfill_events
 from drama_agent.workflow.worker import JobWorker
 import structlog
@@ -82,10 +85,13 @@ app.include_router(files_img_router)
 app.include_router(config_router)
 app.include_router(providers_router)
 app.include_router(artifacts_router)
+app.include_router(clips_router)
 app.include_router(assets_router)
 app.include_router(characters_router)
 app.include_router(prompt_router)
 app.include_router(scripts_router)
+app.include_router(stories_router)
+app.include_router(story_text_router)
 app.include_router(adaptation_router)
 
 

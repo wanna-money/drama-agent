@@ -42,9 +42,13 @@ interface ReferencesPanelProps {
   onPersist: (next: RefEntry[]) => Promise<void>
   /** 只改瞬时上传态,不落库。 */
   onPatch: (key: string, patch: Partial<RefEntry>) => void
+  /** 打开「从分镜提炼 → 生成」。带上已存的 prompt,让用户改而不是重新提炼。 */
+  onGenerate?: (key: string, prompt?: string) => void
 }
 
-export default function ReferencesPanel({ projectId, entries, onPersist, onPatch }: ReferencesPanelProps) {
+export default function ReferencesPanel({
+  projectId, entries, onPersist, onPatch, onGenerate,
+}: ReferencesPanelProps) {
   const [addingType, setAddingType] = useState<ReferenceType | null>(null)
   const [newKey, setNewKey] = useState('')
   const [pickingType, setPickingType] = useState<ReferenceType | null>(null)
@@ -149,6 +153,14 @@ export default function ReferencesPanel({ projectId, entries, onPersist, onPatch
       }
       extra={
         <Space align="center">
+          {/* 素材库里没有这个场景的图时,从该场地点的分镜提炼描述直接生成。
+              已绑定的也给入口:背景图很少一次满意,重生成改的是存下来的 prompt。 */}
+          {onGenerate && (
+            <Button
+              size="small" type="tertiary" theme="borderless" icon={<IconImage />}
+              onClick={() => onGenerate(entry.key, entry.prompt)}
+            >{entry.image_url ? '重新生成' : '生成'}</Button>
+          )}
           {entry.image_url && (
             <Button
               size="small" type="tertiary" theme="borderless"

@@ -196,7 +196,9 @@ export default function CharactersPage() {
   const openGenerate = (c: Character, lk: Look) => {
     setGenTarget({ character: c, look: lk })
     setGenViews(null)
-    setGenCharDesc(c.description || c.name)
+    // 提示词以 AI 抽的外貌为主:退化成只有角色名时,生成的图会完全丢掉外貌特征
+    // (发色/发型/衣着…),角色形象与剧本脱钩。
+    setGenCharDesc(c.appearance || c.description || c.name)
     setGenLookDesc(lk.name)
     setGenOpen(true)
     configApi.listImageModels()
@@ -357,7 +359,9 @@ export default function CharactersPage() {
           <Space vertical align="start">
             <Space>
               <Text strong>{c.name}</Text>
-              <Text type="tertiary">{c.description || '—'}</Text>
+              {/* 优先展示 AI 抽的外貌:那是角色的实际形象依据(生成 Look 也用它)。
+                  只读 description 会让确认角色后的页面全是「—」—— 外貌明明已入库。 */}
+              <Text type="tertiary">{c.appearance || c.description || '—'}</Text>
             </Space>
             <Space align="center">
               <Text type="tertiary">音色</Text>

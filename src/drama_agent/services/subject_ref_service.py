@@ -18,7 +18,11 @@ from drama_agent.services.video_refs import RefImage
 
 logger = logging.getLogger(__name__)
 
-_LOOK_VIEWS = ("front", "side", "back")
+# face 必须在内:它是四视图里唯一清晰展示五官/肌肤/发丝的那张,而角色一致性最容易崩的
+# 地方正是脸 —— 特写镜头(CU/ECU)不带它,模型只能从全身图里猜五官。
+# 数量不成问题:两个角色 × 4 视图 = 8 张,仍在 provider 的 9 张上限内;真超了由
+# cap_refs 按声明截断(那是 provider 层的职责,不在此处预先削减)。
+_LOOK_VIEWS = ("front", "side", "back", "face")
 
 
 async def _look_refs(project_id: str, name: str, scene: str,

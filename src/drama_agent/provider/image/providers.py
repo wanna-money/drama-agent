@@ -32,9 +32,12 @@ def builtin_image_providers() -> list[Provider]:
             base_url=OPENAI_BASE_URL,
             api_key=settings.openai_api_key or None, enabled=False,
             models=[
+                # 1536x512(3:1)是上游支持的最宽档(实测出图成功;2048x576=3.56:1 与
+                # 1024x512=2:1 均被拒)。角色四视图横排需要它 —— 只声明到 1.5:1 时,
+                # 拼图会被挤成近方形,模型改排 2x2、自动裁切必然失败。
                 Model(id="gpt-image-2", label="GPT Image 2",
                       provider="openai-image", kind="image",
-                      resolutions=["1024x1024", "1536x1024", "1024x1536"],
+                      resolutions=["1024x1024", "1536x1024", "1024x1536", "1536x512"],
                       default_resolution="1024x1024"),
             ],
         ),

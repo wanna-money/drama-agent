@@ -39,23 +39,47 @@ describe('NewProjectPage (slim: title + genre only)', () => {
 
   it('creates project (title+genre) and navigates to its episode list', async () => {
     vi.mocked(projectsApi.create).mockResolvedValue({
-      id: 'new-proj', title: '新项目', genre: 'drama', status: 'empty',
+      id: 'new-proj', title: '新项目', genre: 'drama', visual_style: 'realistic', status: 'empty',
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     })
     renderPage()
     fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '新项目' } })
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() => expect(projectsApi.create).toHaveBeenCalledOnce())
     const callArg = vi.mocked(projectsApi.create).mock.calls[0][0]
     expect(callArg.title).toBe('新项目')
-    expect(callArg).not.toHaveProperty('raw_input')  // raw_input 已挪到建集
+    // 故事正文不属于作品:它的家是剧本(作品只管小说原文 source_text)
+    expect(callArg).not.toHaveProperty('raw_input')
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/projects/new-proj'))
+  })
+
+  it('要求选择视觉风格才能提交', async () => {
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '新项目' } })
+    fireEvent.click(screen.getByText('创建项目'))
+    await waitFor(() => expect(screen.getByText('请选择视觉风格')).toBeInTheDocument())
+    expect(projectsApi.create).not.toHaveBeenCalled()
+  })
+
+  it('提交时带上选中的视觉风格', async () => {
+    vi.mocked(projectsApi.create).mockResolvedValue({
+      id: 'new-proj', title: '新项目', genre: 'drama', visual_style: 'cyberpunk',
+      status: 'empty', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    })
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '新项目' } })
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'cyberpunk' } })
+    fireEvent.click(screen.getByText('创建项目'))
+    await waitFor(() => expect(projectsApi.create).toHaveBeenCalledWith(
+      expect.objectContaining({ visual_style: 'cyberpunk' })))
   })
 
   it('shows error toast when creation fails', async () => {
     vi.mocked(projectsApi.create).mockRejectedValue({ message: 'Server error' })
     renderPage()
     fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '新项目' } })
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() => expect(Toast.error).toHaveBeenCalled())
   })
@@ -71,6 +95,7 @@ describe('NewProjectPage 小说模式', () => {
     vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p-new' } as any)
     renderPage()
     fillTitle('我的小说')
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴小说全文/), { target: { value: '很长的正文' } })
     fireEvent.change(screen.getByPlaceholderText(/期望集数/), { target: { value: '6' } })
     fireEvent.click(screen.getByText('创建项目'))
@@ -82,6 +107,7 @@ describe('NewProjectPage 小说模式', () => {
     vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p-new' } as any)
     renderPage()
     fillTitle('我的小说')
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴小说全文/), { target: { value: '很长的正文' } })
     fireEvent.change(screen.getByPlaceholderText(/与集数二选一/), { target: { value: '90' } })
     fireEvent.click(screen.getByText('创建项目'))
@@ -95,6 +121,7 @@ describe('NewProjectPage 小说模式', () => {
     vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p-new' } as any)
     renderPage()
     fillTitle('短故事作品')
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() => expect(projectsApi.create).toHaveBeenCalledOnce())
     const arg = vi.mocked(projectsApi.create).mock.calls[0][0]
@@ -110,6 +137,7 @@ describe('NewProjectPage 小说模式', () => {
     vi.mocked(projectsApi.create).mockResolvedValue({ id: 'p-new' } as any)
     renderPage()
     fillTitle('我的小说')
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴小说全文/), { target: { value: '很长的正文' } })
     const episodes = screen.getByPlaceholderText(/期望集数/)
     fireEvent.change(episodes, { target: { value: '6' } })
@@ -127,6 +155,7 @@ describe('NewProjectPage 小说模式', () => {
     })
     renderPage()
     fillTitle('我的小说')
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     fireEvent.change(screen.getByPlaceholderText(/粘贴小说全文/), { target: { value: '很长的正文' } })
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() => expect(Toast.error).toHaveBeenCalledWith(

@@ -3,6 +3,7 @@ import { useNavigate, useBlocker } from 'react-router-dom'
 import { Button, Toast, Form, Card, Typography, Space, Modal } from '@douyinfe/semi-ui'
 import { projectsApi, CreateProjectData } from '../services/api'
 import { GENRES } from '../constants/genres'
+import { VISUAL_STYLES } from '../constants/visual_styles'
 import PageShell from '../components/PageShell'
 
 const { Text } = Typography
@@ -24,6 +25,7 @@ export default function NewProjectPage() {
   const handleSubmit = async (values: {
     title: string
     genre: string
+    visual_style: string
     source_text?: string
     target_episodes?: number
     target_seconds_per_episode?: number
@@ -35,6 +37,7 @@ export default function NewProjectPage() {
       const data: CreateProjectData = {
         title: values.title.trim(),
         genre: values.genre,
+        visual_style: values.visual_style,
         ...(sourceText ? { source_text: sourceText } : {}),
         ...(values.target_episodes ? { target_episodes: Number(values.target_episodes) } : {}),
         ...(values.target_seconds_per_episode
@@ -73,6 +76,14 @@ export default function NewProjectPage() {
           />
           <Form.Select field="genre" label="故事类型">
             {GENRES.map(g => <Form.Select.Option key={g.value} value={g.value}>{g.label}</Form.Select.Option>)}
+          </Form.Select>
+          <Form.Select
+            field="visual_style"
+            label="视觉风格"
+            placeholder="选择整体画风，后续每一集都会遵循这个风格"
+            rules={[{ required: true, message: '请选择视觉风格' }]}
+          >
+            {VISUAL_STYLES.map(s => <Form.Select.Option key={s.value} value={s.value}>{s.label}</Form.Select.Option>)}
           </Form.Select>
           <Form.TextArea
             field="source_text"

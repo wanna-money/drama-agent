@@ -27,6 +27,7 @@ const mockProject = {
   id: 'proj-1',
   title: '测试项目',
   genre: 'drama',
+  visual_style: 'realistic',
   status: 'running',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -132,10 +133,12 @@ describe('ProjectListPage', () => {
     fireEvent.click(screen.getByText('新建项目'))
     // 填剧名(genre 有默认 drama)
     fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '  新剧  ' } })
+    fireEvent.change(screen.getByLabelText('视觉风格'), { target: { value: 'realistic' } })
     // 点确定 → submitForm → onSubmit → create
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() =>
-      expect(projectsApi.create).toHaveBeenCalledWith({ title: '新剧', genre: 'drama' })
+      expect(projectsApi.create).toHaveBeenCalledWith(
+        { title: '新剧', genre: 'drama', visual_style: 'realistic' })
     )
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/projects/new-1'))
   })
@@ -148,5 +151,28 @@ describe('ProjectListPage', () => {
     fireEvent.click(screen.getByText('创建项目'))
     await waitFor(() => expect(screen.getByText('请输入剧名')).toBeInTheDocument())
     expect(projectsApi.create).not.toHaveBeenCalled()
+  })
+
+  it('创建项目时要求选择视觉风格', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([])
+    renderPage()
+    await waitFor(() => screen.getByText('还没有作品'))
+    fireEvent.click(screen.getByText('新建项目'))
+    fireEvent.change(screen.getByPlaceholderText('为你的短剧起一个名字'), { target: { value: '新剧' } })
+    fireEvent.click(screen.getByText('创建项目'))
+    await waitFor(() => expect(screen.getByText('请选择视觉风格')).toBeInTheDocument())
+    expect(projectsApi.create).not.toHaveBeenCalled()
+  })
+
+  // 列表里给用户看的是中文;drama/romance 是后端枚举值,漏译就把内部取值漏给了用户。
+  it('类型列展示中文而非枚举原值', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([
+      { id: 'p1', title: '作品甲', genre: 'romance', status: 'empty',
+        episodes: [], created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
+    ] as any)
+    render(<ProjectListPage />)
+    await waitFor(() => expect(screen.getByText('作品甲')).toBeInTheDocument())
+    expect(screen.getByText('爱情')).toBeInTheDocument()
+    expect(screen.queryByText('romance')).not.toBeInTheDocument()
   })
 })

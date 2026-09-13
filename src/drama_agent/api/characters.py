@@ -1,17 +1,25 @@
 """项目级角色 CRUD + 造型 + 三视图(上传/AI 生成)。文件走 AssetStorage 工厂。"""
 import base64
+import binascii
+import logging
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from PIL import UnidentifiedImageError
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from drama_agent.db.enums import CharacterView
+from drama_agent.db.models import Project
+from drama_agent.db.session import get_db
 from drama_agent.services import audio_validate
 from drama_agent.services import character_entity_service as svc
 from drama_agent.services import character_gen_service
 from drama_agent.services import character_import_service
 from drama_agent.services.asset_storage import get_asset_storage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["characters"])
 
@@ -20,8 +28,12 @@ ALLOWED_MIME = "image/"
 
 
 def _char_dict(r) -> dict:
+    # appearance(AI 抽的外貌)必须下发:角色页展示它,「生成形象」也用它当提示词。
+    # 只回 description(人手写备注,通常为空)会让页面显示「—」,
+    # 且生成的图完全丢掉外貌特征 —— 角色形象与剧本脱钩。
     return {"id": r.id, "project_id": r.project_id, "name": r.name,
-            "description": r.description, "voice_key": r.voice_key}
+            "description": r.description, "appearance": r.appearance,
+            "voice_key": r.voice_key}
 
 
 def _look_dict(r) -> dict:
@@ -66,6 +78,9 @@ class GenSheetIn(BaseModel):
     model_id: str
     character_desc: str | None = None
     look_desc: str | None = None
+    # 整条 prompt 直给(如从剧本提炼后用户改过的)。给了就不再用 _sheet_prompt 拼 ——
+    # 用户改过的措辞必须原样进模型,否则"可编辑"是假的。
+    prompt: str | None = None
 
 
 class ViewsFromGenerated(BaseModel):
@@ -150,7 +165,9 @@ async def upload_view(pid: str, cid: str, lid: str, view: str, file: UploadFile 
 
 
 @router.post("/projects/{pid}/characters/{cid}/looks/{lid}/generate-sheet")
-async def generate_sheet(pid: str, cid: str, lid: str, body: GenSheetIn):
+async def generate_sheet(
+    pid: str, cid: str, lid: str, body: GenSheetIn, db: AsyncSession = Depends(get_db)
+):
     """生成四视图 sheet 并尝试自动裁切。
 
     始终回传 sheet_b64(原图);自动裁切失败时 views=None,前端据此转人工裁切
@@ -158,15 +175,26 @@ async def generate_sheet(pid: str, cid: str, lid: str, body: GenSheetIn):
     """
     char = await _verify_char(pid, cid)
     await _verify_look(pid, cid, lid)
-    desc = body.character_desc or char.description or char.name
+    # appearance(AI 抽的外貌)优先:只退回 description/name 时,生成的图会丢掉外貌特征
+    desc = body.character_desc or char.appearance or char.description or char.name
     look_desc = body.look_desc or ""
+    # pid 已能定位作品,查它的 visual_style 传给 service —— 不需要前端多传字段。
+    visual_style = (await db.execute(
+        select(Project.visual_style).where(Project.id == pid))).scalar_one_or_none() or ""
     try:
         sheet, views = await character_gen_service.generate_four_view_sheet(
-            desc, look_desc, body.model_id)
+            desc, look_desc, body.model_id, prompt=body.prompt, visual_style=visual_style)
     except NotImplementedError as e:
         raise HTTPException(501, str(e) or "当前图片模型不支持生成")
     except ValueError as e:
         raise HTTPException(422, str(e))
+    except Exception as e:  # noqa: BLE001 — 上游 4xx(尺寸/内容不合法)不该以 500 暴露
+        # 500 在前端只显示 "Internal Server Error",用户看不到真正的原因
+        # (实测:尺寸超上游比例上限时页面毫无反应)。透出上游 message 才可行动。
+        # **必须留日志**:只把 message 转给前端而不记堆栈,排查时无从下手(自己踩过)。
+        logger.warning("四视图生成失败 char=%s look=%s model=%s",
+                       cid, lid, body.model_id, exc_info=True)
+        raise HTTPException(502, f"图片生成失败: {str(e)[:300]}")
     enc = lambda b: base64.b64encode(b).decode()  # noqa: E731
     return {
         "sheet_b64": enc(sheet),
@@ -175,6 +203,41 @@ async def generate_sheet(pid: str, cid: str, lid: str, body: GenSheetIn):
             "back": enc(views[2]), "face": enc(views[3]),
         },
     }
+
+
+class CropSheetIn(BaseModel):
+    sheet_b64: str
+
+
+@router.post("/projects/{pid}/characters/{cid}/looks/{lid}/crop-sheet")
+async def crop_sheet(pid: str, cid: str, lid: str, body: CropSheetIn):
+    """把一张四视图 sheet 切开并填入 Look;切不开时 views=None 而非报错。
+
+    与 generate-sheet 分开:生成与落库之间用户可以反复重新生成,只有他点保存的那张才该
+    落库 —— 生成时顺带切会把中间弃用的那些也写进造型。
+    """
+    await _verify_char(pid, cid)
+    await _verify_look(pid, cid, lid)
+    try:
+        content = base64.b64decode(body.sheet_b64, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(422, "sheet_b64 非法")
+    try:
+        views = character_gen_service.crop_four_views(content)
+    except character_gen_service.CropFailed as e:
+        # 生成本身是成功的,切不开只是没法自动填四视图 —— 回 200 带 views=None,
+        # 让前端引导人工裁切;报 4xx 会让调用方以为整次生成失败而丢掉图。
+        return {"views": None, "detail": str(e)}
+    except UnidentifiedImageError:
+        raise HTTPException(422, "图片无法解析")
+    names = (CharacterView.FRONT.value, CharacterView.SIDE.value,
+             CharacterView.BACK.value, CharacterView.FACE.value)
+    row = None
+    for view, content_i in zip(names, views):
+        row = await svc.set_view(lid, view, content_i, f"{view}.png", "image/png")
+        if row is None:
+            raise HTTPException(404, "造型不存在")
+    return {"views": _look_dict(row) if row else None}
 
 
 @router.post("/projects/{pid}/characters/{cid}/looks/{lid}/views-from-generated")

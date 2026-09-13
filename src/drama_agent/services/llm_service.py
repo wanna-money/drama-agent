@@ -29,17 +29,28 @@ class LLMService:
         user: str,
         temperature: float = 0.7,
         model: str | None = None,
+        images: list[str] | None = None,
     ) -> LLMResult:
-        """完整结果(含 usage),供计费统计;内部层。"""
+        """完整结果(含 usage),供计费统计;内部层。
+
+        images:图片 data URL / http URL 列表,非空时 user 消息走多模态 content 数组
+        (OpenAI 兼容的 `[{type:text},{type:image_url}]` 形状)。为空时请求体与改造前
+        逐字节一致 —— 绝大多数调用不带图,不该为此改变它们的线格式。
+        """
         if not model:
             raise ValueError("model must be specified")
         # 动态查 registry,便于测试重绑
         registry = provider_pkg.provider_registry
         prov, mdl = registry.resolve_model(model)
         protocol = get_llm_protocol(prov.protocol)
-        messages = [
+        user_content: str | list[dict] = user
+        if images:
+            user_content = [{"type": "text", "text": user}] + [
+                {"type": "image_url", "image_url": {"url": u}} for u in images
+            ]
+        messages: list[dict] = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user_content},
         ]
         return await protocol.complete(
             prov, mdl, messages=messages,
@@ -52,9 +63,11 @@ class LLMService:
         user: str,
         temperature: float = 0.7,
         model: str | None = None,
+        images: list[str] | None = None,
     ) -> str:
         """简单补全,返回文本(对外层,拆包 LLMResult.text + 记账)。"""
-        result = await self.complete_result(system, user, temperature=temperature, model=model)
+        result = await self.complete_result(
+            system, user, temperature=temperature, model=model, images=images)
         await usage_service.record_llm(
             result.usage or {}, provider=_provider_id(model), model=model or ""
         )
@@ -66,13 +79,14 @@ class LLMService:
         user: str,
         temperature: float = 0.3,
         model: str | None = None,
+        images: list[str] | None = None,
     ) -> dict:
         """补全并解析 JSON,剥离可能的 markdown 围栏。"""
         system_with_json = (
             system + "\n\nRespond ONLY with valid JSON. No markdown, no explanation."
         )
         result = await self.complete_result(
-            system_with_json, user, temperature=temperature, model=model
+            system_with_json, user, temperature=temperature, model=model, images=images
         )
         await usage_service.record_llm(
             result.usage or {}, provider=_provider_id(model), model=model or ""

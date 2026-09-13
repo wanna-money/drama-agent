@@ -50,6 +50,19 @@ async def append_event(
     return _to_dict(row)
 
 
+async def latest_seq(session: AsyncSession, episode_id: str) -> int:
+    """该集当前的事件水位(没有事件则 0)。
+
+    首次进页面的客户端要拿它作 last_seq 起点 —— 否则以 0 连 WebSocket,后端会把**全部
+    历史事件**当增量补给它,早已修掉的旧 error 会被重新弹成 toast(每次刷新弹一次)。
+    水位由后端下发,前端不自行推断(规范 4)。
+    """
+    from sqlalchemy import func
+    return int((await session.execute(
+        select(func.coalesce(func.max(Event.seq), 0))
+        .where(Event.episode_id == episode_id))).scalar() or 0)
+
+
 async def fetch_since(
     session: AsyncSession, episode_id: str, after_seq: int, limit: int = 200
 ) -> list[dict]:

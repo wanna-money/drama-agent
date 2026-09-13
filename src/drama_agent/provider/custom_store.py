@@ -15,7 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 def row_to_provider(row) -> Provider:
-    """CustomProvider ORM 行 → Provider(models_json → [Model])。"""
+    """CustomProvider ORM 行 → Provider(models_json → [Model])。
+
+    paths / response_map / config 用 getattr 取:本项目无迁移工具,已有库要手动 ALTER
+    出这些列。列不存在时必须降级为空(= 走协议官方默认),不能让 registry 构建失败 ——
+    那会使整站没有任何可用模型。
+    """
     models = [Model(**m) for m in (row.models_json or [])]
     return Provider(
         id=row.provider_id,
@@ -24,6 +29,9 @@ def row_to_provider(row) -> Provider:
         base_url=row.base_url,
         api_key=row.api_key,
         models=models,
+        paths=getattr(row, "paths_json", None) or {},
+        response_map=getattr(row, "response_map_json", None) or {},
+        config=getattr(row, "config_json", None) or {},
     )
 
 

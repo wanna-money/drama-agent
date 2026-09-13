@@ -26,11 +26,13 @@ const TAB_LIST = [
 ]
 
 // 各分类的推荐 prompt:选定分类后预填,用户可改 + AI 润色。
+// 每条都按「主体 → 构图 → 材质光影 → 约束」的块序写,并带上该类的锁死项 ——
+// 用户直接生成也能得到可复用的素材(锁死项的完整说明在后端 _SUBJECT_BLOCKS)。
 const RECOMMENDED_PROMPT: Record<AssetCategory, string> = {
-  character: '角色四视图设定板,从左到右:正面全身、侧面全身、背面全身、面部特写;同一角色,一致的五官/发型/妆容/服装;纯白背景,居中,无文字无水印',
-  background: '场景概念图,电影感光影,层次丰富,无人物,横构图,高细节',
-  prop: '道具特写,纯白背景,居中展示,细节清晰,无关联场景,无人物',
-  costume: '服装展示图,平铺或立体挂展,纯白背景,面料与版型细节清晰,无人物',
+  character: '角色四视图设定板,从左到右:正面全身、侧面全身、背面全身、面部特写;同一角色,一致的五官/发型/妆容/服装,各视图服装细节不得变化;柔和均匀光,纯白背景,居中,无文字无水印无边框',
+  background: '场景概念图,明确视角与尺度,写清时间与天气,材质与光源具体,电影感光影,层次丰富,画面无人物,高细节,无文字无水印',
+  prop: '道具特写,单一主体居中,材质与工艺清晰(注明金属/塑料/皮革等),柔光棚拍,纯白背景,不带关联场景、不带手部,无文字无水印',
+  costume: '服装展示图,平铺(或立体挂展,择一),面料/版型/缝线/配件细节清晰,柔和均匀光,纯白背景,画面无人物,无文字无水印',
 }
 
 interface AssetFormValues {
@@ -67,7 +69,9 @@ export default function AssetsPage() {
     const cur = genPrompt.trim()
     if (!cur) { Toast.error('请先输入描述'); return }
     const category = target === 'gen' ? genCategory : editing?.category
-    const subject = category === 'character' ? 'character' : undefined
+    // 四类都有各自的"锁死项"(后端 _SUBJECT_BLOCKS):背景不许出现人物、道具不许带手…
+    // 只传 character 会让另外三类拿不到专项约束,生成出无法复用的素材。
+    const subject = category || undefined
     setOptimizing(true)
     try {
       const r = await promptApi.optimize({ raw_prompt: cur, kind: 'image', subject })

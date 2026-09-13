@@ -7,10 +7,17 @@ import { IconPlus } from '@douyinfe/semi-icons'
 import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
 import { projectsApi, Project } from '../services/api'
 import { GENRES } from '../constants/genres'
+import { VISUAL_STYLES } from '../constants/visual_styles'
+
+// 展示名由 GENRES 派生 —— 取值权威在后端 db.enums.Genre,前端只做中文展示。
+// 各页都从这里派生,不各抄一份(抄了迟早分叉)。
+const GENRE_LABEL: Record<string, string> = Object.fromEntries(
+  GENRES.map(g => [g.value, g.label])
+)
 
 const { Text } = Typography
 
-interface CreateValues { title?: string; genre: string }
+interface CreateValues { title?: string; genre: string; visual_style: string }
 
 const STATUS_COLOR: Record<string, TagColor> = {
   empty: 'grey', running: 'blue', paused: 'orange',
@@ -34,7 +41,9 @@ export default function ProjectListPage() {
   const handleCreate = async (values: CreateValues) => {
     setCreating(true)
     try {
-      const project = await projectsApi.create({ title: (values.title ?? '').trim(), genre: values.genre })
+      const project = await projectsApi.create({
+        title: (values.title ?? '').trim(), genre: values.genre, visual_style: values.visual_style,
+      })
       Toast.success('项目已创建，去添加第一集')
       navigate(`/projects/${project.id}`)
     } catch (e: unknown) {
@@ -66,7 +75,7 @@ export default function ProjectListPage() {
     {
       title: '类型',
       dataIndex: 'genre',
-      render: (v: string) => <Text type="tertiary">{v}</Text>,
+      render: (v: string) => <Text type="tertiary">{GENRE_LABEL[v] || v}</Text>,
     },
     {
       title: '状态',
@@ -154,7 +163,9 @@ export default function ProjectListPage() {
         <Form<CreateValues>
           getFormApi={(api) => (formApiRef.current = api)}
           onSubmit={handleCreate}
-          initValues={{ genre: 'drama' }}
+          // visual_style 故意不给默认值(风格没有一个"大多数人都想要"的默认,强制用户
+          // 显式选择);initValues 类型要求完整 Values,故用 Partial 断言仅带 genre。
+          initValues={{ genre: 'drama' } as CreateValues}
           labelPosition="top"
         >
           <Form.Input
@@ -163,6 +174,14 @@ export default function ProjectListPage() {
           />
           <Form.Select field="genre" label="故事类型">
             {GENRES.map(g => <Form.Select.Option key={g.value} value={g.value}>{g.label}</Form.Select.Option>)}
+          </Form.Select>
+          <Form.Select
+            field="visual_style"
+            label="视觉风格"
+            placeholder="选择整体画风，后续每一集都会遵循这个风格"
+            rules={[{ required: true, message: '请选择视觉风格' }]}
+          >
+            {VISUAL_STYLES.map(s => <Form.Select.Option key={s.value} value={s.value}>{s.label}</Form.Select.Option>)}
           </Form.Select>
         </Form>
       </Modal>

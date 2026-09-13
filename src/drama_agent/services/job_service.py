@@ -27,9 +27,13 @@ def _as_utc(dt: datetime | None) -> datetime | None:
 async def enqueue(
     session: AsyncSession, kind: JobKind, episode_id: str,
     dedup_key: str, payload: dict | None = None, project_id: str = "",
+    max_attempts: int = 3,
 ) -> dict:
     """幂等入队:命中 (episode_id, kind, dedup_key) 既有则返回,不新建。
-    project_id 为冗余列,便于按项目聚合查询。"""
+    project_id 为冗余列,便于按项目聚合查询。
+
+    max_attempts 由调用方按任务性质决定:图执行类可重试(默认 3),
+    单次外部生成类应设 1 —— 失败多为内容审核/参数问题,重试只是重复付费。"""
     existing = (await session.execute(
         select(Job).where(
             Job.episode_id == episode_id, Job.kind == kind.value, Job.dedup_key == dedup_key
@@ -51,12 +55,14 @@ async def enqueue(
         existing.heartbeat_at = None
         existing.attempts = 0
         existing.error_message = None
+        existing.max_attempts = max_attempts
         await session.commit()
         await session.refresh(existing)
         return _to_dict(existing)
     row = Job(
         id=str(uuid.uuid4()), episode_id=episode_id, project_id=project_id, kind=kind.value,
         status=JobStatus.QUEUED.value, dedup_key=dedup_key, payload_json=payload,
+        max_attempts=max_attempts,
     )
     session.add(row)
     try:
@@ -132,13 +138,19 @@ async def fail_or_requeue(session: AsyncSession, job_id: str, error: str) -> str
     return "failed"
 
 
-async def reap_stale(session: AsyncSession, timeout_seconds: int) -> int:
-    """running 且心跳超时的 job：未超 max_attempts → requeue，否则 failed。返回处理数。"""
+async def reap_stale(session: AsyncSession, timeout_seconds: int) -> tuple[int, list[dict]]:
+    """running 且心跳超时的 job：未超 max_attempts → requeue，否则 failed。
+
+    返回 (处理数, 被判死的 job 列表)。**判死的 job 必须带出来** —— 这条路径下
+    没有任何 runner 在跑,它的业务实体(Episode/Clip/…)不会被任何人标终态,
+    只能由调用方(worker._reap)按 kind 收尾;不带出来,那些实体会永远停在 running。
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
     rows = (await session.execute(
         select(Job).where(Job.status == JobStatus.RUNNING.value)
     )).scalars().all()
     count = 0
+    failed: list[Job] = []
     for row in rows:
         hb = _as_utc(row.heartbeat_at)
         if hb is not None and hb >= cutoff:
@@ -151,6 +163,10 @@ async def reap_stale(session: AsyncSession, timeout_seconds: int) -> int:
         else:
             row.status = JobStatus.FAILED.value
             row.error_message = "reaped: heartbeat timeout, max attempts exceeded"
+            failed.append(row)
         count += 1
+    # 提交前转 dict:commit 后若会话配置 expire_on_commit=True,行属性会触发
+    # 惰性加载,而调用方拿到的是已提交、可能已脱离会话生命周期的对象。
+    failed_dicts = [_to_dict(row) for row in failed]
     await session.commit()
-    return count
+    return count, failed_dicts

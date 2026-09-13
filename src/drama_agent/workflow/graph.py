@@ -48,11 +48,16 @@ async def screenplay_review_node(state: DramaState) -> dict:
 async def cast_resolve_node(state: DramaState) -> dict:
     """把剧本人物对齐到作品角色库,产出 cast 与待确认清单。
 
+    源剧本入库时已确认过阵容的(state.cast 非空)在此直接放行:身份确认只该发生一次,
+    再问一遍等于让用户为同一批角色确认两次,且两次结果可能不同。
+
     与 cast_review 分成两个节点(照 look_assignment → look_review 的先例):interrupt()
     会挂起节点,其后的 return 只在 resume 时才执行 —— 待确认清单必须在**中断之前**就
     写进状态,否则前端读 status 投影时拿不到"要确认什么"。
     """
     from drama_agent.services import cast_service
+    if state.get("cast"):
+        return {"cast_pending": [], "current_stage": "cast_resolved"}
     resolved = await cast_service.resolve(state["project_id"], state.get("story_analysis"))
     return {
         "cast": resolved["cast"],
@@ -334,6 +339,10 @@ async def close_graphs():
       · uvicorn --reload:旧 server 子进程收不干净,继续占着 checkpoint db;
         多次重启后堆起一批僵尸,请求可能被事件循环已停的那个接走 → 后端整体无响应
     (事件循环已关闭的场景下不能 await close(),改用同步的 conn.stop();见 tests/conftest.py)
+
+    本函数只在 lifespan 收到关停时才会执行,所以**进程必须真的收得到 SIGTERM**:
+    后端不能由 `uv run uvicorn ...` 拉起 —— uv 把 uvicorn 当子进程,不转发信号,
+    lifespan 于是永不进入关停分支(见 start.sh 的 PYBIN)。
     """
     global _graph, _checkpointer_conn
     _graph = None

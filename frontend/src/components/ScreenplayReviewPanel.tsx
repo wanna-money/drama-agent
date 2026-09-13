@@ -56,6 +56,12 @@ interface ScreenplayReviewPanelProps {
 
 /** 剧本审核面板(剧集页):版本树 + AI 对话式改写 + 手动编辑 + 通过/修改。
  * 审核动作打到剧集维度的 workflowApi(revise/edit/revert),approve/reject 交父页统一处理。 */
+/** 版本下拉的短标签:改写意见常是整段话,超长会把 Select 撑出容器。 */
+function versionLabel(label: string, max = 12): string {
+  const t = (label || '').trim()
+  return t.length > max ? `${t.slice(0, max)}…` : t
+}
+
 export default function ScreenplayReviewPanel({
   episodeId, screenplay, versions = [], current = 0, isReviewing, reviewLoading,
   onApprove, onReject, onApplied,
@@ -115,13 +121,13 @@ export default function ScreenplayReviewPanel({
     }
   }
 
-  /** 存入剧本库(全局可复用素材)。审核中与审核后都可存 —— 后端只要求正文非空。 */
+  /** 存为该原文的一个改编方案(可复用)。审核中与审核后都可存 —— 后端只要求正文非空。 */
   const handleSaveToLibrary = async () => {
     if (savingToLibrary) return
     setSavingToLibrary(true)
     try {
       await scriptsApi.saveFromEpisode(episodeId)
-      Toast.success('已存入剧本库')
+      Toast.success('已存为改编方案')
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } }; message?: string }
       Toast.error('存入失败: ' + (err?.response?.data?.detail || err?.message || '未知错误'))
@@ -149,11 +155,14 @@ export default function ScreenplayReviewPanel({
           title="剧本"
           headerExtraContent={
             <Space wrap>
-              {/* 存入剧本库不受 isReviewing 门控 —— 剧本库页承诺的正是"审核通过后可存入",
+              {/* 存为方案不受 isReviewing 门控 —— 故事详情页承诺的正是"审核通过后可存入",
                   而通过后本面板仍渲染、isReviewing 已为 false。编辑未保存时不给入口。 */}
               {!editing && (
-                <Button loading={savingToLibrary} onClick={handleSaveToLibrary}>存入剧本库</Button>
+                <Button loading={savingToLibrary} onClick={handleSaveToLibrary}>存为改编方案</Button>
               )}
+              {/* 版本 label 是改写意见原文,可能很长(整段"把角色改成…并调整…")。
+                  versionLabel 截断它 —— 不截断 Select 会被撑到与右侧按钮重叠、溢出容器;
+                  完整意见在下方版本说明里,此处只需能区分版本。 */}
               {isReviewing && versions.length > 0 && (
                 <Select
                   value={viewVersionIdx}
@@ -162,7 +171,10 @@ export default function ScreenplayReviewPanel({
                     const idx = Number(v)
                     setSelectedVersion(idx === current ? null : idx)
                   }}
-                  optionList={versions.map((ver, i) => ({ value: i, label: `版本${i + 1}·${ver.label}` }))}
+                  optionList={versions.map((ver, i) => ({
+                    value: i,
+                    label: `版本${i + 1}·${versionLabel(ver.label)}`,
+                  }))}
                 />
               )}
               {isReviewing && (editing ? (

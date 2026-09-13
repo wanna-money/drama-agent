@@ -9,18 +9,32 @@ from io import BytesIO
 from PIL import Image
 
 from drama_agent.services import asset_gen_service
+from drama_agent.workflow.constants import VISUAL_STYLE_PHRASE
 
 _WHITE_CUTOFF = 240   # 灰度 ≥ 此值视为白底
 _ROW_SAMPLE = 200     # 采样行数上限(加速)
 
 
-def _sheet_prompt(character_desc: str, look_desc: str) -> str:
+def _sheet_prompt(character_desc: str, look_desc: str, visual_style: str = "") -> str:
+    """四视图拼图的 prompt。
+
+    "**单行横排 + 视图之间留白**"这两句是自动裁切的前提:crop_four_views 靠竖向纯白空隙
+    定位分界,模型一旦排成 2x2 网格或让人物彼此紧贴,就只剩 1 条空隙、裁切必然失败
+    (实测在接近方形的画布上尤其容易发生)。
+    """
+    style_phrase = VISUAL_STYLE_PHRASE.get(visual_style, "")
+    style_clause = f"整体视觉风格:{style_phrase}。" if style_phrase else ""
     return (
         f"角色四视图 character turnaround sheet。角色:{character_desc}。造型/服饰:{look_desc}。"
-        "从左到右均匀排四个:正面全身、侧面(profile)全身、背面全身、面部特写(face close-up),"
+        f"{style_clause}"
+        "严格排成**一行**(single horizontal row, 1x4 layout),从左到右依次是:"
+        "正面全身、侧面(profile)全身、背面全身、面部特写(face close-up);"
+        "禁止 2x2 网格或多行排列;"
+        "相邻视图之间留出明显的纯白竖向间隔(clear white vertical gap between each view),"
+        "人物之间不得重叠或紧贴;"
         "四个视图为同一角色同一造型,保持一致的五官/发型/妆容/服装/气质;"
         "面部特写清晰展示五官、肌肤纹理、妆容与发丝细节;"
-        "纯白背景,居中,无文字,无水印,无边框。"
+        "纯白背景,无文字,无水印,无边框。"
     )
 
 
@@ -76,14 +90,68 @@ def crop_four_views(sheet: bytes) -> tuple[bytes, bytes, bytes, bytes]:
     return out[0], out[1], out[2], out[3]
 
 
+_FALLBACK_SIZE = "1024x1024"   # 各家图片模型都支持的方图
+
+
+def _resolve_model(model_id: str):
+    """解析出该模型的声明(能力的唯一真相在 registry);解析不到返回 None。"""
+    from drama_agent import provider as provider_pkg
+    try:
+        _prov, mdl = provider_pkg.provider_registry.resolve_model(model_id)
+    except Exception:  # noqa: BLE001 — 解析不到不阻断,由 pick_sheet_size 兜底
+        return None
+    return mdl
+
+
+def _aspect(res: str) -> float | None:
+    """"1536x1024" → 1.5;非法格式返回 None(声明来自 DB / 界面,可能有脏数据)。"""
+    parts = res.lower().split("x")
+    if len(parts) != 2:
+        return None
+    try:
+        w, h = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    return w / h if h > 0 else None
+
+
+_TARGET_ASPECT = 4.0   # 四个视图一字排开的天然比例
+
+
+def pick_sheet_size(model) -> str:
+    """四视图拼图的尺寸:在该模型**声明的** resolutions 里挑最接近 4:1 的那个。
+
+    两点都不能省:
+      · 必须取自声明 —— 硬编码 "2048x576"(3.56:1)被 gpt-image-2 拒
+        (「maximum supported aspect ratio is 3:1」),而各 provider 早已声明支持哪些尺寸
+        (规范 4:能力的唯一真相在 registry)。
+      · 必须朝 4:1 靠 —— 只挑"最宽"时会选到 1536x1024(1.5:1),那接近方形,模型会把
+        四个视图排成 2x2 或彼此紧贴,竖向留白只剩 1 条,自动裁切必然失败(实测)。
+    """
+    if model is None:
+        return _FALLBACK_SIZE
+    valid = [(r, a) for r in (model.resolutions or []) if (a := _aspect(r)) is not None]
+    if valid:
+        return min(valid, key=lambda ra: abs(ra[1] - _TARGET_ASPECT))[0]
+    return model.default_resolution or _FALLBACK_SIZE
+
+
 async def generate_four_view_sheet(
-    character_desc: str, look_desc: str, model_id: str, size: str = "2048x576"
+    character_desc: str, look_desc: str, model_id: str, size: str | None = None,
+    prompt: str | None = None, visual_style: str = "",
 ) -> tuple[bytes, tuple[bytes, bytes, bytes, bytes] | None]:
     """返回 (原始 sheet, 四视图) —— 裁切失败时后者为 None 而非抛错。
 
     sheet 原图必须一并回传:裁切失败时前端要拿它做人工裁切,只回裁切结果就把原图丢了。
+
+    size 缺省时按模型声明挑(见 pick_sheet_size):写死一个值会在不支持该比例的模型上
+    恒被拒(实测 gpt-image-2 拒 2048x576)。
+
+    prompt 直给时不再用 character_desc/look_desc 拼:那是给"只有描述"的调用方用的默认拼法,
+    而从剧本提炼来的 prompt 已由用户过目改定,再套一层模板会覆盖掉他改的措辞。
     """
-    prompt = _sheet_prompt(character_desc, look_desc)
+    prompt = (prompt or "").strip() or _sheet_prompt(character_desc, look_desc, visual_style)
+    size = size or pick_sheet_size(_resolve_model(model_id))
     images = await asset_gen_service.generate_image(model_id, prompt, size=size, n=1)
     if not images:
         raise ValueError("图片模型未返回结果")

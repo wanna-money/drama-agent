@@ -8,7 +8,7 @@ from drama_agent.db.models import Episode
 from drama_agent.db.enums import LifecycleStatus, JobKind, EventType
 from drama_agent.services import (
     job_service, event_service, cost_service, reference_service,
-    episode_service, screenplay_revise_service,
+    episode_service, text_revise_service,
 )
 from drama_agent.workflow.graph import get_graph
 from drama_agent.workflow.pipeline_steps import build_pipeline
@@ -66,6 +66,10 @@ async def start_workflow(episode_id: str, db: AsyncSession = Depends(get_db)):
         db, JobKind.START, episode_id, dedup_key="start", project_id=ep.project_id
     )
     ep.status = LifecycleStatus.QUEUED.value
+    # 把入口模式钉在开拍这一刻:此后剧本产出会让"当前有没有正文"翻转,
+    # 而左栏步骤清单必须整集恒定(见 episode_service.entry_mode)。
+    ep.entry_mode_at_start = episode_service.entry_mode(
+        ep, await _script_content(db, ep.script_id))
     await db.flush()
     await event_service.append_event(
         db, episode_id, EventType.STAGE_CHANGE, {"lifecycle": "queued"}, project_id=ep.project_id
@@ -134,6 +138,16 @@ async def _graph_still_paused(episode_id: str) -> bool | None:
     return bool(state and getattr(state, "next", ()))
 
 
+async def _script_content(db: AsyncSession, script_id: str | None) -> str | None:
+    """源剧本正文(供入口模式判定);取不到按无正文处理。"""
+    if not script_id:
+        return None
+    from drama_agent.db.models import Script
+    row = (await db.execute(
+        select(Script).where(Script.id == script_id))).scalar_one_or_none()
+    return row.content if row else None
+
+
 @router.get("/{episode_id}/workflow/status")
 async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db)):
     """轻量状态:读投影(Episode 生命周期 + 最近事件摘要),不反序列化整个图状态。
@@ -154,6 +168,7 @@ async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db
             paused_at = None
     agg = await cost_service.aggregate_entity(db, episode_id)
     shots = snapshot.get("shots", [])
+    script_content = await _script_content(db, ep.script_id)
     return {
         "episode_id": episode_id,
         "project_id": ep.project_id,
@@ -184,11 +199,11 @@ async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db
         "duration_over_target": bool(snapshot.get("duration_over_target", False)),
         # 流水线步骤(单一真相在后端 pipeline_steps);中断时以 paused_at 作当前步。
         # by_node 的键是 current_stage,由 build_pipeline 按 stages 归并到步上。
+        # 入口模式的唯一权威在 episode_service.entry_mode(规范 4):判据是有没有正文。
+        # 只看 script_id 会把"从故事新建"的集(剧本正文还空)判成 from_script,
+        # 于是前端隐掉它实际要跑的剧本三步。
         "pipeline": build_pipeline(
-            # 判据与 runner 的入口判定同源(规范 4):有剧本(改编种入的版本 or 复用的源剧本)
-            # 就不走剧本三步。只看 script_id 会把改编切片集判成 from_story,
-            # 于是前端多出三个图根本不跑的死步骤。
-            "from_script" if (ep.screenplay_versions or ep.script_id) else "from_story",
+            episode_service.entry_mode(ep, script_content),
             ep.use_keyframes, paused_at or current_stage, costs=agg["by_node"]
         ),
         "cost_total": agg["total"],
@@ -196,6 +211,10 @@ async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db
         "cost_tokens_total": agg["tokens_total"],
         "cost_by_kind": agg["by_kind"],
         "error_message": ep.error_message,
+        # 事件水位:前端拿它作 WebSocket 的 last_seq 起点。不下发的话前端只能从 0 起,
+        # 后端就把该集**全部历史事件**当增量补给它 —— 早已修掉的旧 error 会在每次
+        # 刷新时被重新弹成 toast(实测:页面反复报一个已经不存在的错误)。
+        "last_seq": await event_service.latest_seq(db, episode_id),
     }
 
 
@@ -267,21 +286,24 @@ async def revise_screenplay(
     if not model:
         raise HTTPException(status_code=500, detail="未配置可用的文本模型，请先到「模型管理」配置")
 
-    result = await screenplay_revise_service.turn(
+    # 同一个改写 agent 服务原文与剧本(见 text_revise_service);此处的落库出口是
+    # 版本树 + 图状态,那是**这个调用方**的事,agent 对写哪儿零感知。
+    result = await text_revise_service.turn(
+        text_revise_service.TextKind.SCREENPLAY,
         current or "", [m.model_dump() for m in req.messages], model,
     )
     if result["action"] != "apply":
         return {"action": "ask", "reply": result["reply"]}
 
     version = await episode_service.append_screenplay_version(
-        db, episode_id, new_screenplay=result["screenplay"], seed_screenplay=current or "",
+        db, episode_id, new_screenplay=result["text"], seed_screenplay=current or "",
         label=result["summary"] or "AI 改写",
     )
     if version is None:                       # 守卫已确认集存在,理论到不了;防御性 404
         raise HTTPException(status_code=404, detail="Episode not found")
-    await graph.aupdate_state(config, {"screenplay": result["screenplay"]})
+    await graph.aupdate_state(config, {"screenplay": result["text"]})
     return {
-        "action": "apply", "reply": result["reply"], "screenplay": result["screenplay"],
+        "action": "apply", "reply": result["reply"], "screenplay": result["text"],
         "version_index": version["version_index"], "versions_len": version["versions_len"],
     }
 

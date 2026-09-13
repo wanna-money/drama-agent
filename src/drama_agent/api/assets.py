@@ -2,11 +2,15 @@
 import base64
 import logging
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from drama_agent.db.enums import AssetCategory
+from drama_agent.db.models import Project
+from drama_agent.db.session import get_db
 from drama_agent.services import asset_gen_service, asset_service
 from drama_agent.services.asset_storage import get_asset_storage
 
@@ -108,6 +112,9 @@ class GenerateIn(BaseModel):
     prompt: str
     size: str | None = None
     n: int = 1
+    # 非空 = 该次生成属于某作品的项目详情页(如背景/道具/服饰参考图),查该作品的
+    # visual_style 拼进 prompt;留空 = 全局素材库页调用,保持风格无关的现状。
+    project_id: str | None = None
 
 
 class EditIn(BaseModel):
@@ -130,10 +137,15 @@ def _b64_images(images: list[bytes]) -> dict:
 
 
 @router.post("/generate")
-async def generate_asset(body: GenerateIn):
+async def generate_asset(body: GenerateIn, db: AsyncSession = Depends(get_db)):
+    visual_style = ""
+    if body.project_id:
+        visual_style = (await db.execute(
+            select(Project.visual_style).where(Project.id == body.project_id)
+        )).scalar_one_or_none() or ""
     try:
         images = await asset_gen_service.generate_image(
-            body.model_id, body.prompt, size=body.size, n=body.n
+            body.model_id, body.prompt, size=body.size, n=body.n, visual_style=visual_style
         )
     except NotImplementedError as e:
         raise HTTPException(501, str(e) or "当前图片模型不支持生成")

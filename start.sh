@@ -14,11 +14,20 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
+# 后端必须由 venv 的 python 直接跑,不经 `uv run` 包一层:uv 把 uvicorn 作为子进程拉起,
+# 却不转发 SIGTERM —— 信号只到 uv,uvicorn 收不到,lifespan 的 close_graphs 便不会执行,
+# 于是进程活着占住 checkpoint db;多次重启后堆起一批僵尸,只能 kill -9。
+PYBIN=".venv/bin/python"
+if [ ! -x "$PYBIN" ]; then
+    echo "未找到 .venv/bin/python,请先执行 uv sync --extra dev" >&2
+    exit 1
+fi
+
 mkdir -p data/uploads data/outputs "$RUN_DIR"
 
 # Start FastAPI backend in background
 echo "Starting backend on http://localhost:${BACKEND_PORT} ..."
-uv run uvicorn drama_agent.main:app \
+"$PYBIN" -m uvicorn drama_agent.main:app \
     --host 0.0.0.0 \
     --port "$BACKEND_PORT" \
     --reload \

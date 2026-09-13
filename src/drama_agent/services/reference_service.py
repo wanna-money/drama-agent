@@ -30,8 +30,8 @@ def view_url(storage_key: str) -> str:
     return f"/api/characters/view/{storage_key}"
 
 
-def _entry(key: str, ref_type: str, image_url: str = "") -> ReferenceDict:
-    return {"key": key, "ref_type": ref_type, "image_url": image_url}
+def _entry(key: str, ref_type: str, image_url: str = "", prompt: str = "") -> ReferenceDict:
+    return {"key": key, "ref_type": ref_type, "image_url": image_url, "prompt": prompt}
 
 
 def normalize(raw: Iterable[Mapping[str, Any]]) -> list[ReferenceDict]:
@@ -51,7 +51,8 @@ def normalize(raw: Iterable[Mapping[str, Any]]) -> list[ReferenceDict]:
             raise ValueError(
                 f"Invalid ref_type: {ref_type!r} (expected one of {sorted(_VALID_TYPES)})"
             )
-        out[key] = _entry(key, ref_type, str(item.get("image_url") or ""))
+        out[key] = _entry(key, ref_type, str(item.get("image_url") or ""),
+                          str(item.get("prompt") or ""))
     return list(out.values())
 
 
@@ -87,7 +88,8 @@ def stored(source: Mapping[str, Any] | None) -> list[ReferenceDict]:
             ref_type = str(item.get("ref_type") or "")
             if not key or ref_type not in _VALID_TYPES:
                 continue
-            out[key] = _entry(key, ref_type, str(item.get("image_url") or ""))
+            out[key] = _entry(key, ref_type, str(item.get("image_url") or ""),
+                              str(item.get("prompt") or ""))
         return list(out.values())
     return _from_legacy(source.get("character_references"))
 
