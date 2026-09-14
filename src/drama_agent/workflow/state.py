@@ -23,6 +23,14 @@ class ShotDict(TypedDict):
     # 自然语言按顺序描述各节拍占多久、发生什么;None = 单一连续动作,无需合并。
     # 不结构化成 {seconds, action}——那还得再拼回自然语言,不如让 LLM 直接写。
     beats: list[str] | None
+    # 真实叙事时长(秒,可选)。duration_seconds 是**提交给视频平台生成**的时长,
+    # 受平台单支下限约束(见 workflow.constants.shot_duration_bounds);当真实内容
+    # (如一次击中/爆炸)明显短于这个下限时,平台仍按下限生成,多出的尾段是模型为
+    # 填满时长而拉长/放慢/静止的填充。narrative_duration_seconds 声明"真实想要的
+    # 短时长"(严格小于 duration_seconds),video_generator 生成后按它裁掉多余尾段,
+    # 让成片里这一镜的实际长度匹配真实节奏,不必让画面为凑平台下限而显得停滞。
+    # None = 不裁剪,duration_seconds 本身就是最终时长。
+    narrative_duration_seconds: int | None
     description: str
     characters: list[str]
     dialogue: str

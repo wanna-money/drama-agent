@@ -6,6 +6,7 @@ from drama_agent.services.video_service import video_service
 from drama_agent.services.video_refs import RefImage, RefAudio, cap_audio_refs
 from drama_agent.services.ref_delivery import inline_local_refs
 from drama_agent.services.storage_service import storage_service
+from drama_agent.services.video_trim import trim_to_narrative_duration
 from drama_agent.db.session import AsyncSessionLocal
 from drama_agent.services import artifact_service
 from drama_agent.services import subject_ref_service
@@ -209,6 +210,13 @@ async def video_generator_node(state: DramaState) -> dict:
                 # Download video locally
                 local_path = output_dir / f"{shot_id}.mp4"
                 await storage_service.download_file(result.video_url, local_path)
+                # 真实叙事时长明显短于生成时长(如一次击中/爆炸)时,把平台按下限生成
+                # 出来的多余尾段裁掉——那段尾巴是模型为撑满时长而拉长/放慢/静止的
+                # 填充,是"成片像 PPT 一样卡顿"的直接成因之一。只裁本地文件,不影响
+                # provider 那边的原始产出与 revised_prompt/seed 等回传信息。
+                narrative_duration = shot.get("narrative_duration_seconds")
+                if narrative_duration:
+                    await trim_to_narrative_duration(local_path, int(narrative_duration))
                 video["status"] = "succeeded"
                 video["video_url"] = result.video_url
                 video["last_frame_url"] = result.last_frame_url

@@ -112,6 +112,12 @@ Rules for shots:
   例:击中(0.4s) + 跌出(1.6s) → 一镜 `duration_seconds: {min_dur}`,
   `beats: ["前 0.4 秒:拳头击中下颌,头部急偏", "随后:身体失衡跌出画面,烟尘扬起"]`。
   不需要镜内节拍的镜头,`beats` 给 null 或省略
+- **单个动作本身的真实时长明显短于 {min_dur} 秒**(不是多个节拍合并,而是这一镜
+  从头到尾就只有一个 1-2 秒的短促动作,如一次快速对撞、一句惊呼)时,填
+  `narrative_duration_seconds` 为这个真实时长(必须严格小于 `duration_seconds`);
+  系统会在生成后把成片裁到这个真实长度,画面不会因为要撑满 {min_dur} 秒而显得停滞。
+  不需要裁剪的镜头(时长本就接近 {min_dur} 秒,或已用 `beats` 合并出完整节奏)不要填这项,
+  给 null 或省略
 
 节奏硬约束(违反其一即为"动态 PPT",见 shot-sequence 方法论第七节):
 - **时长必须有变化**:同一场景内至少出现 3 种不同的 duration_seconds。
@@ -142,6 +148,7 @@ Return JSON array of shots:
     "color_temp": "{ColorTemp.NEUTRAL.value}",
     "duration_seconds": {DEFAULT_SHOT_DURATION},
     "beats": null,
+    "narrative_duration_seconds": null,
     "location": "内景 咖啡馆 - 日",
     "description": "晨光里熙熙攘攘的城市咖啡馆,大远景建立环境",
     "characters": [],
@@ -295,6 +302,15 @@ def _converge_duration(
             break
         longest = max(above, key=lambda i: (int(out[i]["duration_seconds"]), i))
         out[longest]["duration_seconds"] = int(out[longest]["duration_seconds"]) - 1
+    # 削峰会缩短某些镜头的 duration_seconds;narrative_duration_seconds(若有)必须
+    # 严格小于它所属镜头的 duration_seconds,削峰后这一关系可能被打破(如 6s 削到 5s,
+    # 而 narrative 恰好是 5)。此处重新校验,不满足则退回 None(不裁剪)—— 与生成时的
+    # 校验同一函数,避免两处各写一遍判断逐渐分叉。
+    out = [
+        {**s, "narrative_duration_seconds": _normalize_narrative_duration(
+            s.get("narrative_duration_seconds"), int(s["duration_seconds"]))}
+        for s in out
+    ]
     new_total = sum(int(s["duration_seconds"]) for s in out)
     return out, new_total > target_seconds
 
@@ -306,6 +322,21 @@ def _normalize_beats(value) -> list[str] | None:
         return None
     cleaned = [str(b).strip() for b in value if str(b or "").strip()]
     return cleaned or None
+
+
+def _normalize_narrative_duration(value, duration_seconds: int) -> int | None:
+    """把模型给的 narrative_duration_seconds 规范化为"严格小于 duration_seconds 的正整数"
+    或 None。不满足(非数字/≤0/≥duration_seconds)一律降级为 None —— 语义上它只表达
+    "比生成时长更短的真实时长",不合规的值没有可执行的裁剪意义,与其让 video_generator
+    按一个荒谬值裁出空/负时长的片段,不如在这里就拦掉,退回"不裁剪"这个安全默认。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0 or n >= duration_seconds:
+        return None
+    return n
 
 
 async def _generate_shots(
@@ -338,6 +369,8 @@ async def _generate_shots(
 
     shots: list[ShotDict] = []
     for idx, s in enumerate(shots_data):
+        duration_seconds = max(
+            min_dur, min(int(s.get("duration_seconds", DEFAULT_SHOT_DURATION)), max_dur))
         shot: ShotDict = {
             "shot_id": str(uuid.uuid4()),
             "scene_number": s.get("scene_number", 1),
@@ -351,10 +384,10 @@ async def _generate_shots(
                 s.get("lighting"), Lighting, Lighting.NATURAL.value, "lighting", idx),
             "color_temp": _coerce_enum(
                 s.get("color_temp"), ColorTemp, ColorTemp.NEUTRAL.value, "color_temp", idx),
-            "duration_seconds": max(
-                min_dur,
-                min(int(s.get("duration_seconds", DEFAULT_SHOT_DURATION)), max_dur)),
+            "duration_seconds": duration_seconds,
             "beats": _normalize_beats(s.get("beats")),
+            "narrative_duration_seconds": _normalize_narrative_duration(
+                s.get("narrative_duration_seconds"), duration_seconds),
             "description": s.get("description", ""),
             "characters": _filter_cast(s.get("characters", []), cast_names, idx),
             "dialogue": s.get("dialogue", ""),
