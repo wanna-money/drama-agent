@@ -49,7 +49,8 @@ CRAFT_KINDS = {"shot_language", "shot_sequence", "story_structure", "visual_aest
                "multi_character_blocking", "camera_movement_prompts",
                "vfx_spell_prompt_guide", "lighting_prompt_guide",
                "xianxia_combat_moves", "epic_manifestation_prompts",
-               "lens_language_prompts", "mythical_creature_battle_prompts"}
+               "lens_language_prompts", "mythical_creature_battle_prompts",
+               "facial_expression_prompts", "xianxia_spell_techniques"}
 
 
 def _read_craft(kind: str) -> str:

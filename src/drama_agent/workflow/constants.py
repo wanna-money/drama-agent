@@ -4,12 +4,9 @@
 这些是硬约束(下游代码/视频 API 依赖其字面值),模型只能从中选取,不能自由发明。
 具体选哪个、镜头多长(≤ 上限)仍是模型的创作决策。
 """
-import logging
 from enum import Enum
 
 from drama_agent.db.enums import VisualStyle
-
-logger = logging.getLogger(__name__)
 
 
 class ShotType(str, Enum):
@@ -62,65 +59,33 @@ class ReferenceRole(str, Enum):
     REFERENCE_AUDIO = "reference_audio"
 
 
-# 镜头时长边界(秒)。具体时长由模型按剧情节奏决定,代码只兜上下限。
+# 镜头时长边界(秒)。MAX_SHOT_DURATION 是叙事层单镜上限(剪辑判断:一个镜头该
+# 有多长,不随模型能力放宽);叙事层没有下限 —— 冲击/爆发类镜头可以短至 1 秒,
+# 这正是本模块要保护的表达空间(见 generation_duration_for)。
 MAX_SHOT_DURATION = 10
-MIN_SHOT_DURATION = 5
 DEFAULT_SHOT_DURATION = 5
 
-# 短集(≤ SHORT_EPISODE_SECONDS)放宽单镜下限:5s 下限下 30 秒只容得 6 个镜头,
-# 一条完整的起承转合装不进去。放宽到 3s 让短集能有 10 镜的叙事密度。
-# 只对短集放宽 —— 常规集用 3s 镜头会把节奏切得过碎,且视频模型对极短镜头的表现更差。
-SHORT_EPISODE_SECONDS = 30
-SHORT_EPISODE_MIN_SHOT_DURATION = 3
 
+def generation_duration_for(narrative_seconds: int, model_ref: str = "") -> int:
+    """这一镜提交给视频模型生成任务的时长(秒)。
 
-def _narrative_shot_bounds(target_seconds: int) -> tuple[int, int]:
-    """纯叙事区间(不看模型能力):短集放宽下限到 3s,常规集 5s 起,上限恒为 10s。"""
-    lo = (SHORT_EPISODE_MIN_SHOT_DURATION
-          if target_seconds <= SHORT_EPISODE_SECONDS else MIN_SHOT_DURATION)
-    return lo, MAX_SHOT_DURATION
+    只看模型能力下限,不看叙事意图 —— 叙事时长(ShotDict.duration_seconds)可以
+    短于模型下限,那正是要解决的问题:生成时长必须够模型下限才能提交任务,
+    差额部分由 video_generator 生成后裁剪补上(见 services.video_trim)。
 
-
-def shot_duration_bounds(target_seconds: int, model_ref: str = "") -> tuple[int, int]:
-    """该集单镜时长的 [下限, 上限](秒)。**边界的唯一权威**,prompt 与收敛都必须走它
-    (各自算一遍必然分叉:一边按 3s 收敛、另一边告诉模型下限是 5s)。
-
-    两个约束求交:
-      · 叙事约束(本模块):短集放宽到 3s、常规集 5s 起 —— 3s 镜头会把常规集切碎;
-        上限 10s 是"一个镜头该有多长"的剪辑判断,不随模型能力放宽。
-      · 模型能力(`Model.min_duration`/`max_duration`):平台收不下的值,给了也白给。
-        三个内置模型下限都是 4 秒 —— 短集放宽到的 3 秒会被平台原样拒掉。
-
-    模型区间比叙事上限宽时(如 Seedance 2.5 的 30s)**以叙事上限为准**——
-    能力允许不等于该用,一集 120 秒塞几个 30 秒长镜会毁掉节奏。
-    模型解析不到(未声明 model_ref、自定义 provider 未声明能力)时退回纯叙事区间。
+    model_ref 解析不到能力(空串、未知 provider、自定义 provider 未声明
+    min_duration)时原样返回 narrative_seconds —— 没有约束就不需要抬高。
     """
-    lo, hi = _narrative_shot_bounds(target_seconds)
     if not model_ref:
-        return lo, hi
+        return narrative_seconds
     from drama_agent import provider as provider_pkg
     try:
         _p, m = provider_pkg.provider_registry.resolve_model(model_ref)
     except ValueError:
-        return lo, hi
-    if m.min_duration:
-        lo = max(lo, m.min_duration)
-    if m.max_duration:
-        hi = min(hi, m.max_duration)
-    if lo > hi:
-        logger.warning(
-            "shot_duration_bounds: narrative and model ranges don't overlap, "
-            "using model floor (target_seconds=%s, model_ref=%s, narrative_hi=%s, model_lo=%s)",
-            target_seconds, model_ref, hi, lo,
-        )
-        hi = lo
-    return lo, hi
-
-
-def min_shot_duration(target_seconds: int) -> int:
-    """该集的单镜下限(不看模型能力)。仍对外保留 —— 部分调用点(如收敛函数的兜底)
-    只需要叙事下限;需要模型能力时用 `shot_duration_bounds`。"""
-    return _narrative_shot_bounds(target_seconds)[0]
+        return narrative_seconds
+    if m.min_duration and narrative_seconds < m.min_duration:
+        return m.min_duration
+    return narrative_seconds
 
 
 SHOT_TYPE_DESC: dict[str, str] = {

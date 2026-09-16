@@ -4,8 +4,7 @@ import structlog
 from drama_agent.workflow.state import DramaState, ShotDict
 from drama_agent.workflow.constants import (
     ShotType, CameraMovement, ColorTemp, Lighting,
-    DEFAULT_SHOT_DURATION, SHOT_TYPE_DESC,
-    shot_duration_bounds,
+    DEFAULT_SHOT_DURATION, MAX_SHOT_DURATION, SHOT_TYPE_DESC,
 )
 from drama_agent.config import settings
 from drama_agent.knowledge.store import knowledge_store
@@ -17,7 +16,8 @@ logger = structlog.get_logger()
 
 SYSTEM = system_prompt("""You are a professional film director and storyboard artist.
 Break screenplays into individual shots for video production.
-Each shot must be filmable as a single continuous clip within the duration range given below.""")
+Each shot's duration_seconds is the true narrative length this beat should last on screen —
+decide it purely from emotional intensity and pacing, not from any technical constraint.""")
 
 
 def _format_characters(analysis: dict) -> str:
@@ -47,7 +47,7 @@ def _color_temp_line() -> str:
 
 def build_prompt(
     screenplay: str, analysis: dict, target_seconds: int | None = None,
-    notes: str | None = None, cast_names: list[str] | None = None, model_ref: str = "",
+    notes: str | None = None, cast_names: list[str] | None = None,
 ) -> tuple[str, str]:
     """target_seconds:全片目标时长(秒),约束镜头总时长;缺省取 config 的 target_episode_seconds。
     notes:分镜被打回重做时的人工意见,拼进 prompt 尾部引导重生成(仿 prompt_engineer)。
@@ -55,13 +55,11 @@ def build_prompt(
     cast_names:已确认阵容,作为 shots[].characters 的**受约束取值**下发。名单外的名字
     进了 characters,下游按 character_id 取造型与外貌就会落空(该角色形象逐镜漂移)。
 
-    model_ref:目标视频模型(用于 shot_duration_bounds 求交模型能力区间)。空串时退回
-    纯叙事区间——分镜先于视频模型确定的路径(如复用剧本直达分镜)没有 model_ref 可传。
+    不再需要 model_ref:duration_seconds 是纯叙事时长,与视频模型的生成能力无关
+    (生成时长由 workflow.constants.generation_duration_for 在 prompt_engineer 阶段
+    按需现算,不影响这里怎么写分镜)。
     """
     target_seconds = target_seconds or settings.target_episode_seconds
-    # 下限随集级目标 × 模型能力变(shot_duration_bounds 是唯一权威);prompt 与收敛
-    # 必须用同一个值,否则一边按模型下限收敛、另一边告诉模型下限是别的数。
-    min_dur, max_dur = shot_duration_bounds(target_seconds, model_ref)
     guides = knowledge_store.retrieve("storyboard_guide")
     guide_block = "\n".join(f"- {g}" for g in guides)
 
@@ -97,33 +95,31 @@ CHARACTER VISUAL REFERENCES:
 
 Rules for shots:
 - shots[].characters 里只填已确认阵容里的名字;无名群演不进该字段(写在 action 里)
-- 单镜时长 {min_dur}–{max_dur} 秒
-- 全片目标时长约 {target_seconds} 秒:所有镜头 duration_seconds 之和应接近该值
-  (约 {max(1, target_seconds // min_dur)} 个镜头上下),不要大幅超出
+- **按叙事强度自由决定单镜时长(建议 0.5–{MAX_SHOT_DURATION} 秒)**:这是这一镜在
+  成片里应该演多久,不是"视频模型能生成多久" —— 后者由系统在生成阶段单独处理
+  (必要时会把生成时长垫高到模型下限,再在生成后裁剪回你写的时长,画面不会因此
+  变形)。冲击/爆发类镜头(击中、爆炸、惊吓、反转揭示)该短就写短,可以是
+  0.5-1 秒,**不要因为"怕太短生成不了"而给它一个更长的时长** —— 那正是冲击力
+  消失、成片变成"动态 PPT"的根源
+- 全片目标时长约 {target_seconds} 秒:所有镜头 duration_seconds 之和应接近该值,
+  不要大幅超出
 - Use shot types: {_shot_types_line()}
 - Use camera movements: {_camera_moves_line()}
 - lighting 取值: {_lighting_line()}
 - color_temp 取值: {_color_temp_line()}
 - **同一场景(scene_number 相同)的 lighting 与 color_temp 必须一致**:
   同一场戏里光线不该在镜间跳变。要变光就换场景,或让它随剧情推进(白天→黄昏)整段迁移
-- 需要 <{min_dur} 秒的短促节拍时(击中/爆炸/惊吓/反转揭示),**不要单独成镜** ——
-  视频模型收不下这么短的单支。把它与相邻节拍合并成一镜:`duration_seconds` 给合并后的
-  总长(不低于 {min_dur}),`beats` 按顺序列出镜内节拍(自然语言,写明各自占多久)。
-  例:击中(0.4s) + 跌出(1.6s) → 一镜 `duration_seconds: {min_dur}`,
-  `beats: ["前 0.4 秒:拳头击中下颌,头部急偏", "随后:身体失衡跌出画面,烟尘扬起"]`。
-  不需要镜内节拍的镜头,`beats` 给 null 或省略
-- **单个动作本身的真实时长明显短于 {min_dur} 秒**(不是多个节拍合并,而是这一镜
-  从头到尾就只有一个 1-2 秒的短促动作,如一次快速对撞、一句惊呼)时,填
-  `narrative_duration_seconds` 为这个真实时长(必须严格小于 `duration_seconds`);
-  系统会在生成后把成片裁到这个真实长度,画面不会因为要撑满 {min_dur} 秒而显得停滞。
-  不需要裁剪的镜头(时长本就接近 {min_dur} 秒,或已用 `beats` 合并出完整节奏)不要填这项,
+- **一镜内有多个明显节拍时**(如击中 + 跌出),用 `beats` 按顺序列出各节拍
+  (自然语言,写明各自占多久),`duration_seconds` 给这些节拍的总长。
+  例:`duration_seconds: 2`,`beats: ["前 0.4 秒:拳头击中下颌,头部急偏",
+  "随后 1.6 秒:身体失衡跌出画面,烟尘扬起"]`。单一连续动作的镜头,`beats`
   给 null 或省略
 
 节奏硬约束(违反其一即为"动态 PPT",见 shot-sequence 方法论第七节):
 - **时长必须有变化**:同一场景内至少出现 3 种不同的 duration_seconds。
   全部相同(如每镜都 {DEFAULT_SHOT_DURATION}s)是最常见的失败 —— 那让成片像翻页 PPT
-- **冲击性镜头取下限**:击中、爆炸、惊吓、反转揭示这类镜头用 {min_dur}s(允许的最短值,
-  必要时用上面的 `beats` 合并短促节拍);建立/交代与情绪停留的镜头才用长时长
+- **冲击性镜头取短时长**:击中、爆炸、惊吓、反转揭示这类镜头写 0.5-1 秒
+  (必要时用上面的 `beats` 列出镜内节拍);建立/交代与情绪停留的镜头才用长时长
 - **camera_movement 为 static 的镜头不得超过总数 1/3**:其余必须有运镜;
   即使 static,action 也必须描述**镜内运动**(主体动作 / 风雪烟尘等环境动势)
 - **每个镜头的 action 必须含明确动词**:"站在崖边"不合格(那是状态),
@@ -148,7 +144,6 @@ Return JSON array of shots:
     "color_temp": "{ColorTemp.NEUTRAL.value}",
     "duration_seconds": {DEFAULT_SHOT_DURATION},
     "beats": null,
-    "narrative_duration_seconds": null,
     "location": "内景 咖啡馆 - 日",
     "description": "晨光里熙熙攘攘的城市咖啡馆,大远景建立环境",
     "characters": [],
@@ -229,88 +224,69 @@ def _coerce_enum(value, enum_cls, default, field: str, shot_idx: int):
     return default
 
 
-def _rhythm_ok(shots: list[dict], target_seconds: int, model_ref: str = "") -> str:
+def _rhythm_ok(shots: list[dict], target_seconds: int) -> str:
     """产出是否可用;返回空串表示可用,否则返回该重试的原因。
 
     只写在 prompt 里的约束等于没有约束 —— 模型无视时代码必须发现。
-    两条都是"成片像动态 PPT"的直接成因(见 knowledge/craft/shot_sequence.md)。
+    时长趋同是"成片像动态 PPT"的直接成因(见 knowledge/craft/shot_sequence.md)。
+    不再检查"镜头数 × 下限超目标" —— duration_seconds 现在是纯叙事时长,没有
+    统一下限,总时长只由 LLM 实际写的每镜时长之和决定,由 _converge_duration 收敛。
     """
     durs = [int(s.get("duration_seconds") or 0) for s in shots]
     if len(set(durs)) < 3:
         return f"单镜时长只有 {len(set(durs))} 种取值,节奏是平的"
-    floor, _ = shot_duration_bounds(target_seconds, model_ref)
-    if len(shots) * floor > target_seconds * 1.2:
-        return (f"{len(shots)} 镜 × 下限 {floor}s 已达 {len(shots) * floor}s,"
-                f"无法收敛到目标 {target_seconds}s")
     return ""
 
 
-def _retry_notes(notes: str | None, reason: str, target_seconds: int, model_ref: str = "") -> str:
-    """构造节奏重试的 notes:必须同时给出镜头数与时长多样性两个硬指标。
+def _retry_notes(notes: str | None, reason: str, target_seconds: int) -> str:
+    """构造节奏重试的 notes:必须同时给出总时长与时长多样性两个硬指标。
 
-    只说"收敛不到目标,请重新生成"时,模型会把两条约束当成可互换的 ——
-    实测:35 镜(时长多样)重试后变成 20 镜(全部压平到下限 5s):
-    模型用"牺牲节奏"换了"镜头数达标"。两条约束必须一并写明,不给模型选择空间。
+    只说"节奏不合格,请重新生成"时,模型可能把"凑时长"与"保节奏"当成互换的 ——
+    两条约束必须一并写明,不给模型选择空间。
     """
-    floor, _ = shot_duration_bounds(target_seconds, model_ref)
-    want = max(1, target_seconds // floor)
     ask = (
         f"{reason}。请重新生成,同时满足两条:"
-        f"(1) 产出约 {want} 个镜头(不超过 {want + 2} 个);"
+        f"(1) 所有镜头 duration_seconds 之和接近目标 {target_seconds} 秒;"
         f"(2) 单镜时长必须出现至少 3 种取值 —— 建立/交代镜用长时长、"
-        f"常规叙事居中、冲击镜取下限 {floor}s。"
+        f"常规叙事居中、冲击镜用 0.5-1 秒的短时长。"
         f"两条都要满足,不可用一条换另一条。"
     )
     return f"{notes}\n{ask}" if notes else ask
 
 
 def _converge_duration(
-    shots: list[dict], target_seconds: int, model_ref: str = "",
+    shots: list[dict], target_seconds: int,
 ) -> tuple[list[dict], bool]:
     """总时长收敛:超目标时**从最长的镜头开始逐秒扣**,保住镜头间的相对长短。
 
-    返回 (收敛后的镜头, 是否仍超目标)。扣到人人都在下限仍超 = 镜头数过多,这是 LLM 的
-    产出问题,交给用户决策(duration_over_target),代码不擅自砍镜头 —— 砍镜头 = 代码替
-    用户做剪辑决策。总时长已在目标内则原样返回(收敛是纠偏,不无条件重排)。
+    返回 (收敛后的镜头, 是否仍超目标)。duration_seconds 是纯叙事时长,不再有
+    "平台生成下限"这个约束要保护 —— 削峰可以一直削到 1 秒(不能是 0 或负数),
+    不设更高的地板。总时长已在目标内则原样返回(收敛是纠偏,不无条件重排)。
 
-    **不按比例各自缩放再夹下限**:那种做法会把节奏抹平 —— 一组 {5:11, 6:1, 7:1} 在
-    目标 60s 下,6s 与 7s 都 round 到下限 5s,于是"开场建立镜比其他长"这个节奏信息
-    整段消失。而节奏多样性本身是要保的目标(见 _rhythm_ok 与 craft/shot_sequence.md),
+    **不按比例各自缩放**:那种做法会把节奏抹平 —— 一组 {5:11, 6:1, 7:1} 在
+    目标 60s 下按比例缩放,"开场建立镜比其他长"这个节奏信息会整段消失。
+    而节奏多样性本身是要保的目标(见 _rhythm_ok 与 craft/shot_sequence.md),
     两个目标不该互相拆台:总时长该由"削峰"来收,不是由"压平"来收。
     """
     total = sum(int(s.get("duration_seconds") or 0) for s in shots)
     if total <= target_seconds:
         return shots, False
-    floor, ceil_ = shot_duration_bounds(target_seconds, model_ref)
     out = [
         {**s, "duration_seconds": min(
-            ceil_, max(floor, int(s.get("duration_seconds") or 0)))}
+            MAX_SHOT_DURATION, max(1, int(s.get("duration_seconds") or 0)))}
         for s in shots
     ]
     # 削峰:每轮从当前最长的镜头扣 1 秒(并列时扣靠后的,让前面的建立镜优先保住长度)。
-    #
-    # **扣到只剩一种时长就停** —— 这是本函数最要紧的一条约束。
-    # 当 `镜头数 × floor` 本身就超过目标时(如 13 镜 × 5s = 65s > 60s),
-    # 没有任何时长分配能同时"落在目标内"且"人人不低于下限":继续扣只会把所有镜头
-    # 抹到下限,把节奏也一起抹掉,而总时长**依然超标**。那时既没换来达标、又赔掉了节奏。
-    # 故止步于"还剩多种时长"的那一刻,把超标交给 duration_over_target 让用户决策
-    # (退回重生成 / 手动删镜头 / 接受超时长)—— 代码不擅自砍镜头,也不擅自毁节奏。
+    # 止步于"所有镜头都已在 1 秒"这一安全终止条件 —— 极端情况下(镜头数本身就多)
+    # 即使全削到 1 秒仍可能超标,那是 LLM 产出镜头数过多的问题,交
+    # duration_over_target 让用户决策(退回重生成 / 手动删镜头 / 接受超时长),
+    # 代码不擅自砍镜头。
     while sum(int(s["duration_seconds"]) for s in out) > target_seconds:
-        above = [i for i, s in enumerate(out) if int(s["duration_seconds"]) > floor]
-        if len(above) <= 1:
-            # 只剩一个(或零个)高于下限的镜头:再扣就只剩一种时长了,停手
+        above = [i for i, s in enumerate(out) if int(s["duration_seconds"]) > 1]
+        if not above:
             break
         longest = max(above, key=lambda i: (int(out[i]["duration_seconds"]), i))
         out[longest]["duration_seconds"] = int(out[longest]["duration_seconds"]) - 1
-    # 削峰会缩短某些镜头的 duration_seconds;narrative_duration_seconds(若有)必须
-    # 严格小于它所属镜头的 duration_seconds,削峰后这一关系可能被打破(如 6s 削到 5s,
-    # 而 narrative 恰好是 5)。此处重新校验,不满足则退回 None(不裁剪)—— 与生成时的
-    # 校验同一函数,避免两处各写一遍判断逐渐分叉。
-    out = [
-        {**s, "narrative_duration_seconds": _normalize_narrative_duration(
-            s.get("narrative_duration_seconds"), int(s["duration_seconds"]))}
-        for s in out
-    ]
     new_total = sum(int(s["duration_seconds"]) for s in out)
     return out, new_total > target_seconds
 
@@ -324,33 +300,16 @@ def _normalize_beats(value) -> list[str] | None:
     return cleaned or None
 
 
-def _normalize_narrative_duration(value, duration_seconds: int) -> int | None:
-    """把模型给的 narrative_duration_seconds 规范化为"严格小于 duration_seconds 的正整数"
-    或 None。不满足(非数字/≤0/≥duration_seconds)一律降级为 None —— 语义上它只表达
-    "比生成时长更短的真实时长",不合规的值没有可执行的裁剪意义,与其让 video_generator
-    按一个荒谬值裁出空/负时长的片段,不如在这里就拦掉,退回"不裁剪"这个安全默认。
-    """
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return None
-    if n <= 0 or n >= duration_seconds:
-        return None
-    return n
-
-
 async def _generate_shots(
     state: DramaState, target_seconds: int, cast_names: list[str], notes: str | None,
-    model_ref: str = "",
 ) -> list[ShotDict]:
     """调一次 LLM 并把产出规范化成 ShotDict 列表(枚举卡回、阵容过滤、时长夹取)。
     抽成独立函数是为了让节奏校验失败时能原样重试一次(见 storyboard_director_node)。
     """
     system, user_prompt = build_prompt(
         state["screenplay"], state.get("story_analysis") or {},
-        target_seconds, notes=notes, cast_names=cast_names, model_ref=model_ref,
+        target_seconds, notes=notes, cast_names=cast_names,
     )
-    min_dur, max_dur = shot_duration_bounds(target_seconds, model_ref)
 
     shots_data = await llm_service.complete_json(system, user_prompt, temperature=0.3, model=state.get("llm_model"))
 
@@ -369,8 +328,9 @@ async def _generate_shots(
 
     shots: list[ShotDict] = []
     for idx, s in enumerate(shots_data):
+        # 只夹 [1, MAX_SHOT_DURATION] —— 纯叙事上下限,不再引入任何模型相关的下限。
         duration_seconds = max(
-            min_dur, min(int(s.get("duration_seconds", DEFAULT_SHOT_DURATION)), max_dur))
+            1, min(int(s.get("duration_seconds", DEFAULT_SHOT_DURATION)), MAX_SHOT_DURATION))
         shot: ShotDict = {
             "shot_id": str(uuid.uuid4()),
             "scene_number": s.get("scene_number", 1),
@@ -386,8 +346,6 @@ async def _generate_shots(
                 s.get("color_temp"), ColorTemp, ColorTemp.NEUTRAL.value, "color_temp", idx),
             "duration_seconds": duration_seconds,
             "beats": _normalize_beats(s.get("beats")),
-            "narrative_duration_seconds": _normalize_narrative_duration(
-                s.get("narrative_duration_seconds"), duration_seconds),
             "description": s.get("description", ""),
             "characters": _filter_cast(s.get("characters", []), cast_names, idx),
             "dialogue": s.get("dialogue", ""),
@@ -403,9 +361,6 @@ async def storyboard_director_node(state: DramaState, target_seconds: int | None
     # 生产中图按 (state) 单参调用,故靠 state 携带集级目标(见 runner._build_initial_state)。
     from drama_agent.services import cast_service
     target_seconds = target_seconds or state.get("target_seconds") or settings.target_episode_seconds
-    # 解析键用 video_model(真正的模型 id);为空时退到 provider,与 prompt_engineer/
-    # video_generator 解析视频模型的口径一致(规范 4:同一份能力,唯一解析路径)。
-    model_ref = state.get("video_model") or state.get("video_provider") or ""
     cast_names = await cast_service.roster_names(state["project_id"], state.get("cast"))
     # cast 的键可能是别名(用户把「程序员」link 到已有角色「角色1」)。分镜里用的是规范名,
     # 故把 cast 的键一并换成规范名 —— 否则 prompt_engineer 按规范名查 cast 取不到
@@ -414,29 +369,30 @@ async def storyboard_director_node(state: DramaState, target_seconds: int | None
     canon_cast = cast_service.canonical_cast(state.get("cast"), roster)
 
     notes = state.get("storyboard_revision_notes") or None
-    shots = await _generate_shots(state, target_seconds, cast_names, notes, model_ref)
+    shots = await _generate_shots(state, target_seconds, cast_names, notes)
 
     # 节奏硬约束只写在 prompt 里等于没有约束(LLM 会无视)。产出不合格时重试一次,
     # 把不合格的原因追加进 notes 引导重生成;第二次仍不合格则照常继续(记 warning,
     # 不阻断 —— 卡住整条流水线比节奏平更糟),交后面的 duration_over_target 提示兜底。
     # cast:list[ShotDict] 是 list[dict] 的安全放宽(_rhythm_ok 只读 duration_seconds),
     # mypy 因不变性不自动放宽(与下方 _unify_scene_light 同例)。
-    reason = _rhythm_ok(cast(list[dict], shots), target_seconds, model_ref)
+    reason = _rhythm_ok(cast(list[dict], shots), target_seconds)
     if reason:
         logger.warning("storyboard: rhythm check failed, retrying once",
                        reason=reason, shots=len(shots))
-        retry_notes = _retry_notes(notes, reason, target_seconds, model_ref)
-        shots = await _generate_shots(state, target_seconds, cast_names, retry_notes, model_ref)
-        reason = _rhythm_ok(cast(list[dict], shots), target_seconds, model_ref)
+        retry_notes = _retry_notes(notes, reason, target_seconds)
+        shots = await _generate_shots(state, target_seconds, cast_names, retry_notes)
+        reason = _rhythm_ok(cast(list[dict], shots), target_seconds)
         if reason:
             logger.warning("storyboard: rhythm check still failing after retry",
                            reason=reason, shots=len(shots))
 
     # 同场景光影收敛(prompt 约束是软的,须在落状态前统一)
     unified = _unify_scene_light(cast(list[dict], shots))
-    # 总时长收敛:超目标按比例压缩,镜头一个不少;压到下限仍超只标记不阻断(交审核决策)。
+    # 总时长收敛:超目标从最长镜头逐秒削峰,镜头一个不少;削到人人都在 1 秒仍超
+    # 只标记不阻断(交审核决策)。
     # cast:list[ShotDict] 是 list[dict] 的安全放宽(收敛只读 duration_seconds),mypy 因不变性不自动放宽。
-    converged, over = _converge_duration(unified, target_seconds, model_ref)
+    converged, over = _converge_duration(unified, target_seconds)
     if over:
         logger.warning(
             "storyboard: total duration over target even at per-shot floor",

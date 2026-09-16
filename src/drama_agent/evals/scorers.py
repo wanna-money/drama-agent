@@ -1,5 +1,5 @@
 """节点输出评分函数：规则型（本地、确定）+ LLM-judge 占位。"""
-from drama_agent.workflow.constants import ShotType
+from drama_agent.workflow.constants import MAX_SHOT_DURATION, ShotType
 
 Score = dict  # {"name": str, "passed": bool, "score": float, "detail": str}
 
@@ -32,7 +32,8 @@ def score_screenplay(raw_output: str) -> list[Score]:
 
 def score_storyboard(raw_output: str, parsed: list) -> list[Score]:
     is_list = isinstance(parsed, list) and len(parsed) > 0
-    durations_ok = is_list and all(int(s.get("duration_seconds", 99)) <= 10 for s in parsed)
+    durations_ok = is_list and all(
+        int(s.get("duration_seconds", 99)) <= MAX_SHOT_DURATION for s in parsed)
     types_ok = is_list and all(s.get("shot_type") in _VALID_SHOT_TYPES for s in parsed)
     return [
         _s("is_non_empty_list", is_list),

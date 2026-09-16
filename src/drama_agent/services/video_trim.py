@@ -1,8 +1,9 @@
 """生成后按叙事真实时长裁剪本地视频文件。
 
-用途见 workflow/state.py 的 ShotDict.narrative_duration_seconds 字段注释:视频平台
-有单支生成下限(如 4s),而一次击中/爆炸这类动作的真实时长可能明显更短——平台仍按
-下限生成,多出的尾段是模型为填满时长而拉长/放慢/静止的填充,这正是成片"像 PPT
+用途见 workflow/state.py 的 ShotDict.duration_seconds 字段注释与
+workflow/constants.py 的 generation_duration_for:视频平台有单支生成下限(如 4s),
+而一次击中/爆炸这类动作的叙事时长可能明显更短——提交给平台的生成时长会被垫高到
+下限,多出的尾段是模型为填满时长而拉长/放慢/静止的填充,这正是成片"像 PPT
 一样卡顿"的直接成因之一。裁剪把这段填充切掉,让镜头的实际长度匹配真实节奏。
 
 **未装 ffmpeg 时跳过裁剪、原样保留下载到的文件**——理由与 video_validate.py 一致:

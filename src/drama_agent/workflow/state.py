@@ -18,19 +18,18 @@ class ShotDict(TypedDict):
     # 值域见 constants.Lighting / ColorTemp;prompt_engineer 查 *_PHRASE 表写进 prompt。
     lighting: str
     color_temp: str
+    # 叙事时长(秒)——这一镜在成片里应该呈现的真实长度,由 LLM 按情绪/节奏自由
+    # 决定,不受任何视频模型生成能力约束(可以短至 1 秒,如一次击中/爆炸)。
+    # **提交给视频平台生成的时长**是另一件事,由 workflow.constants.
+    # generation_duration_for(duration_seconds, model_ref) 按需现算、不落状态 ——
+    # 平台单支下限约束只影响"生成多久",不该影响"这一镜该演多久"。当生成时长
+    # 大于这里的叙事时长时,video_generator 生成后按 duration_seconds 裁掉多余
+    # 尾段(那段是模型为填满平台下限而拉长/放慢/静止的填充)。
     duration_seconds: int
-    # 镜内节拍(可选)。有它 = 这一镜由多个短促节拍(<下限秒,如击中/爆炸)合并而成,
-    # 自然语言按顺序描述各节拍占多久、发生什么;None = 单一连续动作,无需合并。
-    # 不结构化成 {seconds, action}——那还得再拼回自然语言,不如让 LLM 直接写。
+    # 镜内节拍(可选)。有它 = 这一镜由多个短促节拍合并而成,自然语言按顺序描述
+    # 各节拍占多久、发生什么;None = 单一连续动作,无需合并。不结构化成
+    # {seconds, action}——那还得再拼回自然语言,不如让 LLM 直接写。
     beats: list[str] | None
-    # 真实叙事时长(秒,可选)。duration_seconds 是**提交给视频平台生成**的时长,
-    # 受平台单支下限约束(见 workflow.constants.shot_duration_bounds);当真实内容
-    # (如一次击中/爆炸)明显短于这个下限时,平台仍按下限生成,多出的尾段是模型为
-    # 填满时长而拉长/放慢/静止的填充。narrative_duration_seconds 声明"真实想要的
-    # 短时长"(严格小于 duration_seconds),video_generator 生成后按它裁掉多余尾段,
-    # 让成片里这一镜的实际长度匹配真实节奏,不必让画面为凑平台下限而显得停滞。
-    # None = 不裁剪,duration_seconds 本身就是最终时长。
-    narrative_duration_seconds: int | None
     description: str
     characters: list[str]
     dialogue: str
@@ -48,6 +47,11 @@ class PromptDict(TypedDict):
     edited_prompt: str | None
     edited_negative_prompt: str | None
     keyframe_url: str | None
+    # 提交给视频模型生成任务的时长(秒)。由 prompt_engineer_node 用
+    # workflow.constants.generation_duration_for(shot.duration_seconds, model_ref)
+    # 算好、随 prompt 一起落状态 —— 与"角色外貌走 character_id"同一原则:一处
+    # 计算,下游(video_generator)只读,不重新解析 model_ref。
+    generation_duration_seconds: int
 
 
 class ReferenceDict(TypedDict):

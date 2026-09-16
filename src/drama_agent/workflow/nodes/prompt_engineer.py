@@ -3,6 +3,7 @@ import structlog
 from drama_agent.workflow.state import DramaState, PromptDict
 from drama_agent.workflow.constants import (
     ReferenceRole, SHOT_TYPE_DESC, LIGHTING_PHRASE, COLOR_TEMP_PHRASE, VISUAL_STYLE_PHRASE,
+    generation_duration_for,
 )
 from drama_agent.workflow.prompt_rules import system_prompt
 from drama_agent.knowledge.store import knowledge_store
@@ -242,6 +243,9 @@ async def prompt_engineer_node(state: DramaState) -> dict:
             "edited_prompt": None,
             "edited_negative_prompt": None,
             "keyframe_url": None,
+            # 现算一次,video_generator 只读 —— 与角色外貌走 character_id 同一原则。
+            "generation_duration_seconds": generation_duration_for(
+                shot["duration_seconds"], model_ref),
         }
         prompts.append(prompt)
 

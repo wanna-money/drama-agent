@@ -2,6 +2,7 @@ import logging
 from dataclasses import asdict
 
 from drama_agent.workflow.state import DramaState, VideoDict
+from drama_agent.workflow.constants import generation_duration_for
 from drama_agent.services.video_service import video_service
 from drama_agent.services.video_refs import RefImage, RefAudio, cap_audio_refs
 from drama_agent.services.ref_delivery import inline_local_refs
@@ -186,7 +187,13 @@ async def video_generator_node(state: DramaState) -> dict:
             "error": None,
         }
 
-        duration = shot.get("duration_seconds", 5)
+        # 叙事时长(这一镜真实该演多久) vs 生成时长(提交给平台的时长,已在
+        # prompt_engineer 阶段用 generation_duration_for 算好、跟着 prompt 落状态)。
+        # prompt 里没有该字段的边缘情况(旧状态、复用剧本直达分镜未过 prompt_engineer)
+        # 才现算一次兜底,不应是常规路径。
+        narrative_seconds = int(shot.get("duration_seconds") or 0) or 5
+        duration = prompt.get("generation_duration_seconds") or generation_duration_for(
+            narrative_seconds, state.get("video_model") or provider_name)
         try:
             task_id = await provider.create_task(
                 prompt=final_prompt,
@@ -210,13 +217,13 @@ async def video_generator_node(state: DramaState) -> dict:
                 # Download video locally
                 local_path = output_dir / f"{shot_id}.mp4"
                 await storage_service.download_file(result.video_url, local_path)
-                # 真实叙事时长明显短于生成时长(如一次击中/爆炸)时,把平台按下限生成
-                # 出来的多余尾段裁掉——那段尾巴是模型为撑满时长而拉长/放慢/静止的
-                # 填充,是"成片像 PPT 一样卡顿"的直接成因之一。只裁本地文件,不影响
-                # provider 那边的原始产出与 revised_prompt/seed 等回传信息。
-                narrative_duration = shot.get("narrative_duration_seconds")
-                if narrative_duration:
-                    await trim_to_narrative_duration(local_path, int(narrative_duration))
+                # 生成时长 > 叙事时长就裁剪 —— 这是默认路径,不是例外:duration_seconds
+                # 是纯叙事时长,平台仍按抬高后的 duration 生成,多出的尾段是模型为撑满
+                # 时长而拉长/放慢/静止的填充,是"成片像 PPT 一样卡顿"的直接成因之一。
+                # 只裁本地文件,不影响 provider 那边的原始产出与 revised_prompt/seed 等
+                # 回传信息。
+                if duration > narrative_seconds:
+                    await trim_to_narrative_duration(local_path, narrative_seconds)
                 video["status"] = "succeeded"
                 video["video_url"] = result.video_url
                 video["last_frame_url"] = result.last_frame_url
