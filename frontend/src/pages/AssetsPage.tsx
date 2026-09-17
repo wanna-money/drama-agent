@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Button, Card, Col, Divider, Form, ImagePreview, List, Modal, Row, Space, Tabs, Tag, Toast, Typography, Upload,
+  Button, Card, Col, Divider, Form, ImagePreview, Modal, Row, Space, Tabs, Tag, Toast, Typography, Upload,
 } from '@douyinfe/semi-ui'
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface'
 import type { FileItem } from '@douyinfe/semi-ui/lib/es/upload'
@@ -186,27 +186,23 @@ export default function AssetsPage() {
     } finally { setSaving(false) }
   }
 
-  const renderItem = (a: Asset) => (
-    <List.Item
+  const renderCard = (a: Asset) => (
+    <Card
       key={a.id}
-      header={<PreviewImage src={a.url} alt={a.name} width={64} height={64} preview={false}
-        onClick={() => setPreview({ visible: true, index: assets.findIndex(x => x.id === a.id) })} />}
-      main={
-        <Space vertical align="start">
-          <Space>
-            <Text strong>{a.name}</Text>
-            <Tag color="blue" shape="circle">{CATEGORY_LABEL[a.category]}</Tag>
-          </Space>
-          <Text type="tertiary">{a.description || '—'}</Text>
-        </Space>
+      cover={
+        <PreviewImage src={a.url} alt={a.name} height={160} preview={false}
+          onClick={() => setPreview({ visible: true, index: assets.findIndex(x => x.id === a.id) })} />
       }
-      extra={
-        <Space>
-          <Button onClick={() => openEdit(a)}>编辑</Button>
-          <Button type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDelete(a)} />
-        </Space>
-      }
-    />
+      actions={[
+        <Button key="edit" onClick={() => openEdit(a)}>编辑</Button>,
+        <Button key="delete" type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDelete(a)} />,
+      ]}
+    >
+      <Space>
+        <Text strong>{a.name}</Text>
+        <Tag color="blue" shape="circle">{CATEGORY_LABEL[a.category]}</Tag>
+      </Space>
+    </Card>
   )
 
   return (
@@ -240,9 +236,13 @@ export default function AssetsPage() {
               />
             )
           ) : (
-            <Card>
-              <List dataSource={assets} renderItem={renderItem} />
-            </Card>
+            <Row gutter={[16, 16]}>
+              {assets.map(a => (
+                <Col key={a.id} xs={12} sm={8} md={6} lg={4}>
+                  {renderCard(a)}
+                </Col>
+              ))}
+            </Row>
           )}
         </Col>
       </Row>

@@ -1,4 +1,143 @@
-/* 仅保留最小 reset。页面底色与所有样式全部交给 Semi Design 原生。 */
+/* 最小 reset + 项目级 Semi token 覆盖(青色主题/圆角/阴影),外加两类经过设计评审
+   明确批准的自定义元素(见 docs/superpowers/specs/2026-09-17-frontend-style-layout-refactor-design.md):
+   1) WorkflowSteps 自绘时间轴(Semi 无等价组件);
+   2) 作品/剧集卡片头图的语义色块(按类型/状态取色,色块本身是信息而非装饰,
+      Semi Card 无 cover 取色概念)。
+   除此之外组件用法与内联 style 仍遵守"Semi 原生零自定义"规范 —— 不为方便而
+   零散加 class,新增自定义样式须先过设计评审。 */
 *, *::before, *::after { box-sizing: border-box; }
 
-body { margin: 0; }
+body {
+  margin: 0;
+  background-color: var(--semi-color-bg-0);
+  color: var(--semi-color-text-0);
+}
+
+:root {
+  --semi-teal-0: 230,250,250;
+  --semi-teal-1: 179,240,240;
+  --semi-teal-2: 122,224,224;
+  --semi-teal-3: 64,208,208;
+  --semi-teal-4: 20,194,194;
+  --semi-teal-5: 0,178,178;
+  --semi-teal-6: 0,153,153;
+  --semi-teal-7: 0,124,124;
+  --semi-teal-8: 0,94,94;
+  --semi-teal-9: 0,64,64;
+
+  --semi-border-radius-small: 6px;
+  --semi-border-radius-medium: 10px;
+  --semi-border-radius-large: 16px;
+}
+
+body, body[theme-mode="dark"] .semi-always-light {
+  --semi-color-primary: rgba(var(--semi-teal-5), 1);
+  --semi-color-primary-hover: rgba(var(--semi-teal-6), 1);
+  --semi-color-primary-active: rgba(var(--semi-teal-7), 1);
+  --semi-color-primary-light-default: rgba(var(--semi-teal-0), 1);
+  --semi-color-primary-light-hover: rgba(var(--semi-teal-1), 1);
+  --semi-color-primary-light-active: rgba(var(--semi-teal-2), 1);
+  --semi-color-link: rgba(var(--semi-teal-5), 1);
+  --semi-color-link-hover: rgba(var(--semi-teal-6), 1);
+  --semi-color-link-active: rgba(var(--semi-teal-7), 1);
+  --semi-color-focus-border: rgba(var(--semi-teal-5), 1);
+  --semi-shadow-elevated: 0 2px 4px rgba(0,0,0,.04), 0 12px 28px rgba(0,0,0,.08);
+}
+
+body[theme-mode="dark"], body .semi-always-dark {
+  --semi-color-primary: rgba(var(--semi-teal-4), 1);
+  --semi-color-primary-hover: rgba(var(--semi-teal-3), 1);
+  --semi-color-primary-active: rgba(var(--semi-teal-5), 1);
+  --semi-color-primary-light-default: rgba(var(--semi-teal-4), .2);
+  --semi-color-primary-light-hover: rgba(var(--semi-teal-4), .3);
+  --semi-color-primary-light-active: rgba(var(--semi-teal-4), .4);
+  --semi-color-link: rgba(var(--semi-teal-4), 1);
+  --semi-color-link-hover: rgba(var(--semi-teal-3), 1);
+  --semi-color-link-active: rgba(var(--semi-teal-5), 1);
+  --semi-color-focus-border: rgba(var(--semi-teal-4), 1);
+  --semi-shadow-elevated: inset 0 0 0 1px rgba(255,255,255,.06), 0 12px 32px rgba(0,0,0,.4);
+}
+
+/* Card 组件走自己的 --semi-card-* token,不吃全局 border-radius 变量,单独覆盖对齐 */
+.semi-card {
+  --semi-card-border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.03), 0 4px 16px rgba(0,0,0,.06);
+}
+body[theme-mode="dark"] .semi-card {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.05), 0 4px 16px rgba(0,0,0,.3);
+}
+
+/* WorkflowSteps(分镜工作台左栏时间轴):Semi 无等价组件的自绘场景(规范 8 例外),
+   状态色引用官方语义 token,不引入新颜色。 */
+.workflow-steps .workflow-step { display: flex; gap: 12px; padding-bottom: 22px; position: relative; }
+.workflow-steps .workflow-step:last-child { padding-bottom: 0; }
+.workflow-steps .workflow-step[data-clickable="true"] { cursor: pointer; }
+.workflow-steps .workflow-step[data-clickable="false"] { cursor: default; }
+.workflow-steps .workflow-step-connector {
+  position: absolute; left: 13px; top: 28px; bottom: 0; width: 2px;
+  background: var(--semi-color-border);
+}
+.workflow-steps .workflow-step[data-status="finish"] .workflow-step-connector {
+  background: var(--semi-color-primary);
+}
+.workflow-steps .workflow-step-dot {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 999px; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; border: 2px solid var(--semi-color-border);
+  background: var(--semi-color-bg-1); color: var(--semi-color-text-2);
+}
+.workflow-steps .workflow-step[data-status="finish"] .workflow-step-dot {
+  background: var(--semi-color-primary); border-color: var(--semi-color-primary); color: var(--semi-color-white);
+}
+.workflow-steps .workflow-step[data-status="process"] .workflow-step-dot {
+  border-color: var(--semi-color-primary); color: var(--semi-color-primary);
+}
+.workflow-steps .workflow-step[data-status="warning"] .workflow-step-dot {
+  background: var(--semi-color-warning); border-color: var(--semi-color-warning); color: var(--semi-color-white);
+}
+.workflow-steps .workflow-step[data-status="error"] .workflow-step-dot {
+  background: var(--semi-color-danger); border-color: var(--semi-color-danger); color: var(--semi-color-white);
+}
+.workflow-steps .workflow-step-title { font-weight: 600; }
+.workflow-steps .workflow-step[data-status="process"] .workflow-step-title { color: var(--semi-color-primary); }
+
+/* 作品/剧集卡片头图:按 genre 取渐变色块(无封面图字段可用,色块本身就是内容而非
+   装饰 —— 见设计文档 3.1)。挂在纯 div 上(Semi Card 无此概念),不改 Card 组件本身。 */
+.project-cover {
+  height: 92px; border-radius: var(--semi-border-radius-medium) var(--semi-border-radius-medium) 0 0;
+  position: relative; display: flex; align-items: flex-end; padding: 10px 12px;
+}
+.project-cover-thriller { background: linear-gradient(135deg, #0F766E, #14B8A6); }
+.project-cover-romance { background: linear-gradient(135deg, #7C3AED, #C4A6FB); }
+.project-cover-action { background: linear-gradient(135deg, #B4650A, #F0B75E); }
+.project-cover-fantasy { background: linear-gradient(135deg, #0E7FA0, #67D3EF); }
+.project-cover-comedy { background: linear-gradient(135deg, #B45309, #FCD34D); }
+.project-cover-drama, .project-cover-default { background: linear-gradient(135deg, #64748B, #A6B4C0); }
+.project-cover-label {
+  font-size: 11.5px; font-weight: 700; color: rgba(255,255,255,.92);
+  background: rgba(0,0,0,.22); padding: 3px 9px; border-radius: 999px;
+}
+.project-card-delete {
+  position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity .15s ease;
+}
+.project-card:hover .project-card-delete { opacity: 1; }
+
+/* 剧集卡片头图:按状态(而非类型)取渐变 —— 制作进度比题材更值得一眼看出。 */
+.episode-cover {
+  height: 84px; border-radius: var(--semi-border-radius-medium) var(--semi-border-radius-medium) 0 0;
+  position: relative; display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 12px;
+}
+.episode-cover-running, .episode-cover-queued { background: linear-gradient(135deg, var(--semi-color-primary), rgba(var(--semi-teal-7), 1)); }
+.episode-cover-paused { background: linear-gradient(135deg, #F0B75E, #B4650A); }
+.episode-cover-completed { background: linear-gradient(135deg, #3FAE7C, #157A4B); }
+.episode-cover-failed { background: linear-gradient(135deg, #D9736E, #BA3A3A); }
+.episode-cover-created { background: var(--semi-color-fill-0); }
+.episode-cover-label {
+  font-size: 12.5px; font-weight: 800; color: rgba(255,255,255,.95);
+}
+.episode-cover-created .episode-cover-label { color: var(--semi-color-text-2); }
+.episode-cover-tag {
+  font-size: 10.5px; font-weight: 700; color: rgba(255,255,255,.85);
+  background: rgba(0,0,0,.2); padding: 2px 7px; border-radius: 999px;
+}
+.episode-cover-created .episode-cover-tag { color: var(--semi-color-text-2); background: var(--semi-color-bg-1); }

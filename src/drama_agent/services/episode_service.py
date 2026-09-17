@@ -216,3 +216,62 @@ async def set_current_version(
     row.state_snapshot = {**(row.state_snapshot or {}), "screenplay": chosen}
     await session.commit()
     return {"screenplay": chosen, "version_index": version_index}
+
+
+# ── 分镜版本树(与上面的剧本版本树同构,实体字段换成 shots) ──────────────────
+# storyboard_director 每次(重新)生成都追加一版,而不是覆盖 —— 否则"退回重新
+# 生成"会让已看过、可能更满意的上一版分镜无法再对比或恢复(见 screenplay 版本树
+# 同一动机)。写侧在图节点内直接调用(见 storyboard_director_node),读侧/回退侧
+# 与剧本对称,供 API 层的 /storyboard/revert 使用。
+
+def _effective_shots_versions(row: Episode) -> list[dict]:
+    """读侧权威:版本是否存在以这里为准;无数据则从当前快照的 shots 合成一条"初稿"。"""
+    if row.shots_versions:
+        return list(row.shots_versions)
+    shots = (row.state_snapshot or {}).get("shots") or []
+    if not shots:
+        return []
+    return [{"shots": shots, "label": "初稿", "created_at": None}]
+
+
+async def append_shots_version_db(
+    session: AsyncSession, episode_id: str, *, shots: list[dict], label: str,
+) -> dict | None:
+    """追加一版分镜。label 截断到 80 字(与 append_screenplay_version 同例,
+    避免版本下拉里的意见原文把 UI 撑爆)。"""
+    row = (await session.execute(
+        select(Episode).where(Episode.id == episode_id))).scalar_one_or_none()
+    if row is None:
+        return None
+    versions = list(row.shots_versions) if row.shots_versions else []
+    versions.append({
+        "shots": shots,
+        "label": (label or "").strip()[:80] or "重新生成",
+        "created_at": datetime.now(UTC).isoformat(),
+    })
+    row.shots_versions = versions
+    row.shots_version_current = len(versions) - 1
+    await session.commit()
+    return {
+        "version_index": row.shots_version_current,
+        "versions_len": len(versions),
+    }
+
+
+async def set_current_shots_version(
+    session: AsyncSession, episode_id: str, version_index: int,
+) -> dict | None:
+    """把当前生效分镜版本切到 version_index,返回该版本的 shots 供调用方写回图状态。
+    越界抛 IndexError,由调用方(API 层)映射成 422。"""
+    row = (await session.execute(
+        select(Episode).where(Episode.id == episode_id))).scalar_one_or_none()
+    if row is None:
+        return None
+    versions = _effective_shots_versions(row)
+    if not 0 <= version_index < len(versions):
+        raise IndexError(f"版本号 {version_index} 超出范围(共 {len(versions)} 版)")
+    row.shots_version_current = version_index
+    chosen = versions[version_index]["shots"]
+    row.state_snapshot = {**(row.state_snapshot or {}), "shots": chosen}
+    await session.commit()
+    return {"shots": chosen, "version_index": version_index}

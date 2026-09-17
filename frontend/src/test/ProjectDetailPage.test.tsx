@@ -121,7 +121,7 @@ const renderPage = () =>
  */
 const gotoStep = async (label: string) => {
   const step = await waitFor(() => {
-    const el = screen.getAllByTestId('step').find(e => e.textContent === label)
+    const el = screen.getAllByTestId('step').find(e => e.querySelector('[data-testid="step-title"]')?.textContent === label)
     if (!el) throw new Error(`未找到步骤: ${label}`)
     return el
   })
@@ -718,7 +718,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'analyzing' })
     renderPage()
     await waitFor(() => expect(screen.getByText('故事分析')).toBeInTheDocument())
-    const analysisStep = screen.getAllByTestId('step').find(el => el.textContent === '故事分析')
+    const analysisStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '故事分析')
     expect(analysisStep).toHaveAttribute('data-status', 'process')
   })
 
@@ -733,7 +733,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'prompts_review' })
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
-    const promptsStep = screen.getAllByTestId('step').find(el => el.textContent === 'Prompt')
+    const promptsStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === 'Prompt')
     expect(promptsStep).toHaveAttribute('data-status', 'warning')
   })
 
@@ -747,7 +747,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'failed', error_message: '生成失败' })
     renderPage()
     await waitFor(() => expect(screen.getByText('生成失败')).toBeInTheDocument())
-    const promptsStep = screen.getAllByTestId('step').find(el => el.textContent === 'Prompt')
+    const promptsStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === 'Prompt')
     expect(promptsStep).toHaveAttribute('data-status', 'error')
   })
 
@@ -761,8 +761,8 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'storyboard_ready' })
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
-    const analysisStep = screen.getAllByTestId('step').find(el => el.textContent === '故事分析')
-    const screenplayStep = screen.getAllByTestId('step').find(el => el.textContent === '剧本')
+    const analysisStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '故事分析')
+    const screenplayStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '剧本')
     expect(analysisStep).toHaveAttribute('data-status', 'finish')
     expect(screenplayStep).toHaveAttribute('data-status', 'finish')
   })
@@ -777,7 +777,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'completed' })
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
-    const doneStep = screen.getAllByTestId('step').find(el => el.textContent === '完成')
+    const doneStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '完成')
     expect(doneStep).toHaveAttribute('data-status', 'finish')
   })
 
@@ -794,7 +794,7 @@ describe('ProjectDetailPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
     const byLabel = (label: string) =>
-      screen.getAllByTestId('step').find(el => el.textContent === label)
+      screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === label)
     expect(byLabel('故事分析')).toHaveAttribute('data-clickable', 'true')   // 当前步
     expect(byLabel('剧本')).toHaveAttribute('data-clickable', 'false')  // 未推进到
     expect(byLabel('完成')).toHaveAttribute('data-clickable', 'false')
@@ -819,7 +819,7 @@ describe('ProjectDetailPage', () => {
     renderPage()
     // 当前步(分镜)的专属内容已在右栏
     await waitFor(() => expect(screen.getByText('分镜步专属内容')).toBeInTheDocument())
-    const later = screen.getAllByTestId('step').find(el => el.textContent === '生成视频')!
+    const later = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '生成视频')!
     fireEvent.click(later)
     // 仍停在当前步,没有跳到"该步骤尚未开始"的空面板
     await waitFor(() => expect(screen.getByText('分镜步专属内容')).toBeInTheDocument())
@@ -1171,7 +1171,7 @@ describe('ProjectDetailPage', () => {
     vi.mocked(episodesApi.get).mockResolvedValue({ ...baseEpisode, status: 'completed' })
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
-    const videoStep = screen.getAllByTestId('step').find(el => el.textContent === '生成视频')
+    const videoStep = screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === '生成视频')
     expect(videoStep).toHaveAttribute('data-status', 'error')
   })
 
@@ -1405,7 +1405,7 @@ describe('ProjectDetailPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByTestId('steps')).toBeInTheDocument())
     const byLabel = (l: string) =>
-      screen.getAllByTestId('step').find(el => el.textContent === l)
+      screen.getAllByTestId('step').find(el => el.querySelector('[data-testid="step-title"]')?.textContent === l)
     expect(byLabel('故事分析')).toHaveAttribute('data-clickable', 'true')
     expect(byLabel('剧本')).toHaveAttribute('data-clickable', 'false')
     expect(byLabel('完成')).toHaveAttribute('data-clickable', 'false')

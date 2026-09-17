@@ -110,6 +110,11 @@ START → story_analyzer → screenplay_writer → screenplay_review[interrupt]
 `docs/superpowers/specs/2026-09-13-project-visual-style-design.md`):
 已有库跑一次 `.venv/bin/python scripts/migrate_visual_style.py`(幂等)。
 
+`Episode.shots_versions` / `shots_version_current`(分镜版本树,与
+`screenplay_versions` 同构:storyboard_director 每次生成追加一版,分镜审核态
+可切换预览/回退历史版本):
+已有库跑一次 `.venv/bin/python scripts/migrate_shots_versions.py`(幂等)。
+
 **新增会被 registry 读取的列时,读取处必须用 `getattr` 降级**:老库未 ALTER 时
 `row_to_provider` 抛异常 → registry 构建失败 → 整站没有任何可用模型。
 

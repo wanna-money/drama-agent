@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Tag, Modal, Toast, List, Typography, Space, Row, Col, Select } from '@douyinfe/semi-ui'
+import { Button, Card, Tag, Modal, Toast, Typography, Space, Row, Col, Select } from '@douyinfe/semi-ui'
 import type { TagColor } from '@douyinfe/semi-ui/lib/es/tag'
-import { IconPlus, IconUser } from '@douyinfe/semi-icons'
+import { IconPlus, IconUser, IconDelete } from '@douyinfe/semi-icons'
 import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
 import AdaptationPanel from '../components/AdaptationPanel'
 import ClipGallery from '../components/ClipGallery'
 import { projectsApi, episodesApi, clipsApi, Project, Episode, Clip } from '../services/api'
 import { VISUAL_STYLES } from '../constants/visual_styles'
 
-const { Text } = Typography
+const { Text, Title } = Typography
 
 // 展示名由 VISUAL_STYLES 派生 —— 取值权威在后端 db.enums.VisualStyle,前端只做中文展示。
 const VISUAL_STYLE_LABEL: Record<string, string> = Object.fromEntries(
@@ -24,6 +24,14 @@ const STATUS_LABEL: Record<string, string> = {
   created: '待启动', queued: '排队中', running: '制作中', paused: '待审核',
   completed: '已完成', failed: '失败',
 }
+// 卡头渐变按状态取(制作进度比题材更值得一眼看出,与作品列表按类型取色不同)。
+// 样式定义见 index.css 的 .episode-cover-*;未列出的状态兜底到 created(纯色块)。
+const EPISODE_COVER_CLASS: Record<string, string> = {
+  created: 'episode-cover-created', queued: 'episode-cover-queued',
+  running: 'episode-cover-running', paused: 'episode-cover-paused',
+  completed: 'episode-cover-completed', failed: 'episode-cover-failed',
+}
+const episodeCoverClass = (status: string) => EPISODE_COVER_CLASS[status] || 'episode-cover-created'
 
 export default function ProjectEpisodesPage() {
   const { id } = useParams<{ id: string }>()
@@ -71,36 +79,57 @@ export default function ProjectEpisodesPage() {
   }
 
   const episodes: Episode[] = project?.episodes || []
+  const completedCount = episodes.filter(ep => ep.status === 'completed').length
+  const totalCost = episodes.reduce((sum, ep) => sum + (ep.cost_total ?? 0), 0)
+  const anyUnpriced = episodes.some(ep => ep.cost_unpriced)
 
-  const renderItem = (ep: Episode) => (
-    <List.Item
-      onClick={() => navigate(`/episodes/${ep.id}`)}
-      main={
-        <Space>
-          <Text type="tertiary">EP {String(ep.episode_number).padStart(2, '0')}</Text>
-          <Text strong>{ep.title}</Text>
-          <Text type="tertiary">{ep.video_provider}</Text>
-        </Space>
+  const deleteEpisode = (ep: Episode) => {
+    Modal.confirm({
+      title: '删除该集', content: `删除「${ep.title}」后无法恢复,确定继续?`,
+      okType: 'danger', okText: '删除', cancelText: '取消',
+      onOk: async () => {
+        try { await episodesApi.delete(id!, ep.id); Toast.success('已删除'); load() }
+        catch { Toast.error('删除失败') }
+      },
+    })
+  }
+
+  const renderCard = (ep: Episode) => (
+    <Card
+      key={ep.id}
+      className="project-card"
+      cover={
+        <div className={`episode-cover ${episodeCoverClass(ep.status)}`}>
+          <span className="episode-cover-label">EP {String(ep.episode_number).padStart(2, '0')}</span>
+          {ep.aspect_ratio && <span className="episode-cover-tag">{ep.aspect_ratio}</span>}
+        </div>
       }
-      extra={
-        <Space>
-          <Text type="tertiary">{ep.cost_unpriced ? '未定价' : `¥${(ep.cost_total ?? 0).toFixed(2)}`}</Text>
+      actions={[
+        <Button
+          key="delete" className="project-card-delete" type="danger" theme="borderless"
+          icon={<IconDelete />} onClick={() => deleteEpisode(ep)}
+        >删除</Button>,
+      ]}
+    >
+      <Row gutter={[0, 8]}>
+        <Col span={24}>
+          <Text strong link onClick={() => navigate(`/episodes/${ep.id}`)}>{ep.title}</Text>
+        </Col>
+        <Col span={24}>
           <Tag color={STATUS_COLOR[ep.status] || 'grey'}>{STATUS_LABEL[ep.status] || ep.status}</Tag>
-          <Button type="danger" theme="borderless"
-            onClick={(e) => {
-              e.stopPropagation()
-              Modal.confirm({
-                title: '删除该集', content: `删除「${ep.title}」后无法恢复,确定继续?`,
-                okType: 'danger', okText: '删除', cancelText: '取消',
-                onOk: async () => {
-                  try { await episodesApi.delete(id!, ep.id); Toast.success('已删除'); load() }
-                  catch { Toast.error('删除失败') }
-                },
-              })
-            }}>删除</Button>
-        </Space>
-      }
-    />
+        </Col>
+        <Col span={24}>
+          <Row type="flex" justify="space-between">
+            <Col><Text type="tertiary" size="small">{ep.video_provider}</Text></Col>
+            <Col>
+              <Text type="tertiary" size="small">
+                {ep.cost_unpriced ? '未定价' : `¥${(ep.cost_total ?? 0).toFixed(2)}`}
+              </Text>
+            </Col>
+          </Row>
+        </Col>
+      </Row>
+    </Card>
   )
 
   return (
@@ -130,6 +159,31 @@ export default function ProjectEpisodesPage() {
         </PageEmpty>
       ) : (
         <Row gutter={[0, 16]}>
+          {/* 统计条:集数/散片数/花费/已完成数一眼汇总,数据由 episodes/clips 派生,不额外拉接口 */}
+          {episodes.length > 0 && (
+            <Col span={24}>
+              <Card bodyStyle={{ padding: '14px 18px' }}>
+                <Space wrap>
+                  <Space vertical align="start" spacing={2}>
+                    <Text size="small" type="tertiary">集</Text>
+                    <Title heading={5}>{episodes.length}</Title>
+                  </Space>
+                  <Space vertical align="start" spacing={2}>
+                    <Text size="small" type="tertiary">支散片</Text>
+                    <Title heading={5}>{clips.length}</Title>
+                  </Space>
+                  <Space vertical align="start" spacing={2}>
+                    <Text size="small" type="tertiary">总花费</Text>
+                    <Title heading={5}>{anyUnpriced ? '未定价' : `¥${totalCost.toFixed(2)}`}</Title>
+                  </Space>
+                  <Space vertical align="start" spacing={2}>
+                    <Text size="small" type="tertiary">已完成</Text>
+                    <Title heading={5}>{completedCount}</Title>
+                  </Space>
+                </Space>
+              </Card>
+            </Col>
+          )}
           {/* 是否小说作品由面板自己按后端 adaptation 状态判定,非小说作品它渲染 null */}
           <Col span={24}>
             <AdaptationPanel projectId={id!} onCommitted={load}
@@ -148,7 +202,13 @@ export default function ProjectEpisodesPage() {
                 <PageEmpty title="还没有剧集" description="点击右上角「新建创作」开始" />
               )
             ) : (
-              <List dataSource={episodes} renderItem={renderItem} />
+              <Row gutter={[16, 16]}>
+                {episodes.map(ep => (
+                  <Col key={ep.id} xs={24} sm={12} md={8} lg={6}>
+                    {renderCard(ep)}
+                  </Col>
+                ))}
+              </Row>
             )}
           </Col>
           {/* 散片区块:历史入口。空散片时不渲染 —— 大多数作品只走完整剧集,

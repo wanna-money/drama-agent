@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { useParams } from 'react-router-dom'
 import {
-  Button, Card, Empty, Form, ImagePreview, List, Modal, Space, Tag, Toast, Typography, Upload,
+  Button, Card, Col, Collapse, Empty, Form, ImagePreview, List, Modal, Row, Space, Tag, Toast, Typography, Upload,
 } from '@douyinfe/semi-ui'
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface'
 import type { FileItem } from '@douyinfe/semi-ui/lib/es/upload'
@@ -324,7 +324,7 @@ export default function CharactersPage() {
             <Space vertical align="start" key={v}>
               <Text type="tertiary">{VIEW_LABEL[v]}</Text>
               {key
-                ? <PreviewImage src={`/api/characters/view/${key}`} alt={`${lk.name}-${VIEW_LABEL[v]}`} height={120}
+                ? <PreviewImage src={`/api/characters/view/${key}`} alt={`${lk.name}-${VIEW_LABEL[v]}`} height={96}
                     preview={false}
                     onClick={() => {
                       const srcs = VIEWS.filter(vw => lk[VIEW_KEY[vw]])
@@ -350,19 +350,38 @@ export default function CharactersPage() {
     </Card>
   )
 
-  const renderCharacter = (c: Character) => {
+  const renderCharacterPanel = (c: Character) => {
     const looks = looksByCharacter[c.id] || []
     return (
-      <List.Item
+      <Collapse.Panel
         key={c.id}
-        main={
-          <Space vertical align="start">
-            <Space>
-              <Text strong>{c.name}</Text>
-              {/* 优先展示 AI 抽的外貌:那是角色的实际形象依据(生成 Look 也用它)。
-                  只读 description 会让确认角色后的页面全是「—」—— 外貌明明已入库。 */}
-              <Text type="tertiary">{c.appearance || c.description || '—'}</Text>
-            </Space>
+        itemKey={c.id}
+        header={
+          <Row type="flex" justify="space-between" align="middle">
+            <Col>
+              <Space>
+                <Text strong>{c.name}</Text>
+                {/* 优先展示 AI 抽的外貌:那是角色的实际形象依据(生成 Look 也用它)。
+                    只读 description 会让确认角色后的页面全是「—」—— 外貌明明已入库。 */}
+                <Text type="tertiary">{c.appearance || c.description || '—'}</Text>
+              </Space>
+            </Col>
+            <Col>
+              {/* 面板头是可点击区域(点击切换展开/收起),按钮点击须拦住冒泡,
+                  否则点"新建造型"/删除会连带触发面板折叠。纯行为转发,无样式,
+                  不在"零自定义 style"约束范围内(规范 8)。 */}
+              <span onClick={(e: MouseEvent) => e.stopPropagation()}>
+                <Space>
+                  <Button icon={<IconPlus />} onClick={() => openCreateLook(c)}>新建造型</Button>
+                  <Button type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDeleteCharacter(c)} />
+                </Space>
+              </span>
+            </Col>
+          </Row>
+        }
+      >
+        <Row gutter={[0, 16]}>
+          <Col span={24}>
             <Space align="center">
               <Text type="tertiary">音色</Text>
               {c.voice_key ? (
@@ -392,18 +411,20 @@ export default function CharactersPage() {
                 </Upload>
               )}
             </Space>
-            {looks.length
-              ? <Space vertical align="start">{looks.map(lk => renderLook(c, lk))}</Space>
-              : <Text type="tertiary">暂无造型</Text>}
-          </Space>
-        }
-        extra={
-          <Space>
-            <Button icon={<IconPlus />} onClick={() => openCreateLook(c)}>新建造型</Button>
-            <Button type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDeleteCharacter(c)} />
-          </Space>
-        }
-      />
+          </Col>
+          <Col span={24}>
+            {looks.length ? (
+              <Row gutter={[16, 16]}>
+                {looks.map(lk => (
+                  <Col key={lk.id} xs={24} md={12} lg={8}>
+                    {renderLook(c, lk)}
+                  </Col>
+                ))}
+              </Row>
+            ) : <Text type="tertiary">暂无造型</Text>}
+          </Col>
+        </Row>
+      </Collapse.Panel>
     )
   }
 
@@ -425,9 +446,9 @@ export default function CharactersPage() {
       ) : characters.length === 0 ? (
         <PageEmpty title="还没有角色" description="点击右上角「新建角色」，或从素材库人物导入" />
       ) : (
-        <Card>
-          <List dataSource={characters} renderItem={renderCharacter} />
-        </Card>
+        <Collapse defaultActiveKey={characters[0]?.id}>
+          {characters.map(renderCharacterPanel)}
+        </Collapse>
       )}
 
       <Modal

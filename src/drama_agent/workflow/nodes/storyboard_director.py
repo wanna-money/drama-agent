@@ -117,7 +117,7 @@ Rules for shots:
 
 节奏硬约束(违反其一即为"动态 PPT",见 shot-sequence 方法论第七节):
 - **时长必须有变化**:同一场景内至少出现 3 种不同的 duration_seconds。
-  全部相同(如每镜都 {DEFAULT_SHOT_DURATION}s)是最常见的失败 —— 那让成片像翻页 PPT
+  全部相同(不管收敛到哪个数值)是最常见的失败 —— 那让成片像翻页 PPT
 - **冲击性镜头取短时长**:击中、爆炸、惊吓、反转揭示这类镜头写 0.5-1 秒
   (必要时用上面的 `beats` 列出镜内节拍);建立/交代与情绪停留的镜头才用长时长
 - **camera_movement 为 static 的镜头不得超过总数 1/3**:其余必须有运镜;
@@ -133,7 +133,10 @@ Rules for shots:
 Craft guidelines:
 {guide_block}{methodology_block}
 
-Return JSON array of shots:
+Return JSON array of shots. **The two example shots below use deliberately different
+duration_seconds(3 vs 1)** — that difference is itself part of the example: copy the
+shape of these objects, never the numbers, and let every real shot's duration_seconds
+come from its own narrative weight instead of echoing an example value:
 [
   {{
     "scene_number": 1,
@@ -142,12 +145,27 @@ Return JSON array of shots:
     "camera_movement": "{CameraMovement.STATIC.value}",
     "lighting": "{Lighting.NATURAL.value}",
     "color_temp": "{ColorTemp.NEUTRAL.value}",
-    "duration_seconds": {DEFAULT_SHOT_DURATION},
+    "duration_seconds": 3,
     "beats": null,
     "location": "内景 咖啡馆 - 日",
     "description": "晨光里熙熙攘攘的城市咖啡馆,大远景建立环境",
     "characters": [],
     "action": "客人穿行于店内,杯口热气升腾",
+    "dialogue": ""
+  }},
+  {{
+    "scene_number": 1,
+    "shot_number": 2,
+    "shot_type": "{ShotType.CU.value}",
+    "camera_movement": "{CameraMovement.ZOOM.value}",
+    "lighting": "{Lighting.NATURAL.value}",
+    "color_temp": "{ColorTemp.NEUTRAL.value}",
+    "duration_seconds": 1,
+    "beats": null,
+    "location": "内景 咖啡馆 - 日",
+    "description": "杯子被猛地推倒,瓷片飞溅",
+    "characters": [],
+    "action": "手掌猛拍桌面,杯子应声碎裂",
     "dialogue": ""
   }},
   ...
@@ -400,6 +418,18 @@ async def storyboard_director_node(state: DramaState, target_seconds: int | None
             total=sum(int(s["duration_seconds"]) for s in converged),
             shots=len(converged),
         )
+    # 每次(重新)生成追加一版,不覆盖 —— 否则"退回重新生成"会让上一版分镜
+    # (可能更满意、已看过)无法再对比或恢复(见 episode_service 分镜版本树)。
+    # 旁路失败不阻断出片(规范 6):版本历史丢一条不影响本集能不能继续跑。
+    try:
+        from drama_agent.db import session as db_session
+        from drama_agent.services import episode_service
+        label = notes or "初始生成"
+        async with db_session.AsyncSessionLocal() as db:
+            await episode_service.append_shots_version_db(
+                db, state["episode_id"], shots=cast(list[dict], converged), label=label)
+    except Exception:  # noqa: BLE001
+        logger.warning("storyboard: append shots version failed", exc_info=True)
     return {
         "shots": converged,
         "cast": canon_cast,

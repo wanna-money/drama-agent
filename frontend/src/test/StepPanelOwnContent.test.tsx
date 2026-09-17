@@ -82,7 +82,8 @@ const renderPage = () => render(
 )
 
 const stepEl = (label: string) =>
-  screen.getAllByTestId('step').find(e => e.textContent?.replace('▸ ', '').trim() === label)
+  screen.getAllByTestId('step').find(
+    e => e.querySelector('[data-testid="step-title"]')?.textContent?.trim() === label)
 const clickStep = (label: string) => fireEvent.click(stepEl(label)!)
 const waitReady = () => waitFor(() => expect(stepEl('Prompt')).toBeTruthy())
 

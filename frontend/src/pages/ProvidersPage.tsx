@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Modal, Input, InputNumber, Select, Toast, Tag, List, Card, Typography, Space, Divider, Form, Empty, Row, Col, Checkbox } from '@douyinfe/semi-ui'
+import { Button, Modal, Input, InputNumber, Select, Toast, Tag, Card, Typography, Space, Divider, Form, Empty, Row, Col, Checkbox } from '@douyinfe/semi-ui'
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface'
 import { IconPlus, IconDelete } from '@douyinfe/semi-icons'
 import { providersApi, ProviderInfo, ProviderModel, ProviderInput, ModelCost, ProtocolCatalog } from '../services/api'
@@ -196,38 +196,62 @@ export default function ProvidersPage() {
   const videoList = providers.filter(p => p.kind === 'video')
   const imageList = providers.filter(p => p.kind === 'image')
 
-  const renderItem = (p: ProviderInfo) => (
-    <List.Item
-      main={
-        <Space wrap>
-          <Text strong>{p.label}</Text>
-          {p.models.length ? p.models.map(m => (
-            <Space key={m.id} spacing="tight">
-              <Text type="tertiary">{m.id}</Text>
-              {m.is_default && <Tag color="green" shape="circle">默认</Tag>}
+  const renderProviderCard = (p: ProviderInfo) => (
+    <Card key={p.provider_id} bodyStyle={{ padding: 16 }}>
+      <Row gutter={[0, 12]}>
+        <Col span={24}>
+          <Row type="flex" justify="space-between" align="top">
+            <Col>
+              <Text strong>{p.label}</Text>
+              <div><Text type="tertiary" size="small">{p.protocol}</Text></div>
+            </Col>
+            <Col>
+              <Space spacing="tight">
+                {p.enabled === false && <Tag color="grey" shape="circle">未启用</Tag>}
+                {p.builtin && <Tag colorful gradient type="light" shape="circle">内置</Tag>}
+              </Space>
+            </Col>
+          </Row>
+        </Col>
+        <Col span={24}>
+          {p.models.length ? (
+            <Space wrap>
+              {p.models.map(m => (
+                <Space key={m.id} spacing="tight">
+                  <Text type="tertiary">{m.id}</Text>
+                  {m.is_default && <Tag color="green" shape="circle">默认</Tag>}
+                </Space>
+              ))}
             </Space>
-          )) : <Text type="tertiary">—</Text>}
-        </Space>
-      }
-      extra={
-        <Space>
-          <Button onClick={() => openEdit(p)}>编辑</Button>
-          {p.enabled === false && <Tag color="grey" shape="circle">未启用</Tag>}
-          {p.builtin
-            ? <Tag colorful gradient type="light" shape="circle">内置</Tag>
-            : <Button type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDelete(p)} />}
-        </Space>
-      }
-    />
+          ) : <Text type="tertiary">—</Text>}
+        </Col>
+        <Col span={24}>
+          <Space>
+            <Button onClick={() => openEdit(p)}>编辑</Button>
+            {!p.builtin && (
+              <Button type="danger" theme="borderless" icon={<IconDelete />} onClick={() => onDelete(p)} />
+            )}
+          </Space>
+        </Col>
+      </Row>
+    </Card>
   )
 
   const renderGroup = (title: string, list: ProviderInfo[]) => (
     <Row gutter={[0, 8]}>
       <Col span={24}><Text type="tertiary" strong>{title}</Text></Col>
       <Col span={24}>
-        <Card>
-          <List dataSource={list} renderItem={renderItem} emptyContent={<Empty description="暂无" />} />
-        </Card>
+        {list.length === 0 ? (
+          <Card><Empty description="暂无" /></Card>
+        ) : (
+          <Row gutter={[16, 16]}>
+            {list.map(p => (
+              <Col key={p.provider_id} xs={24} sm={12} md={8} lg={6}>
+                {renderProviderCard(p)}
+              </Col>
+            ))}
+          </Row>
+        )}
       </Col>
     </Row>
   )

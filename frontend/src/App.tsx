@@ -1,6 +1,7 @@
 import { createBrowserRouter, RouterProvider, Navigate, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Layout, Nav, Button, Space, Typography } from '@douyinfe/semi-ui'
 import { IconArrowLeft } from '@douyinfe/semi-icons'
+import ThemeToggle from './components/ThemeToggle'
 import ProjectListPage from './pages/ProjectListPage'
 import NewProjectPage from './pages/NewProjectPage'
 import ProjectEpisodesPage from './pages/ProjectEpisodesPage'
@@ -68,6 +69,7 @@ function RootLayout() {
               <Text strong>Drama Agent</Text>
             </Space>
           }
+          footer={<ThemeToggle />}
         />
       </Header>
       <Content style={{ display: 'flex', flexDirection: 'column', padding: '24px' }}>

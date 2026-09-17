@@ -100,6 +100,8 @@ export interface WorkflowStatus {
   cast_pending?: CastPending[]
   screenplay_versions?: ScreenplayVersion[]     // 剧本版本树(后端 Episode 列下发,审核面板据此渲染)
   screenplay_version_current?: number
+  shots_versions?: ShotsVersion[]     // 分镜版本树(同上,实体是 shots)
+  shots_version_current?: number
   duration_over_target?: boolean    // 分镜压到每镜下限仍超集级目标 → 提示退回重做(后端唯一真相)
   pipeline?: { steps: { key: string; label: string; cost?: number }[]; current: string | null }
   cost_total?: number
@@ -519,6 +521,12 @@ export interface ScreenplayVersion {
   created_at: string | null
 }
 
+export interface ShotsVersion {
+  shots: Shot[]
+  label: string
+  created_at: string | null
+}
+
 /** 故事库:文本入库产出的是**原文**,不是剧本 —— 故新建/分析/改原文都在这里。
  *
  * 建出来的东西该去哪个列表找,由它是什么决定:原文进 storiesApi.list,
@@ -608,6 +616,11 @@ export const workflowApi = {
   revertEpisode: (episodeId: string, versionIndex: number) =>
     api.post<{ screenplay: string; version_index: number }>(
       `/episodes/${episodeId}/screenplay/revert`, { version_index: versionIndex }
+    ).then(r => r.data),
+  // 分镜版本回退(审核态):守卫在后端(须暂停在 storyboard_review)。
+  revertStoryboard: (episodeId: string, versionIndex: number) =>
+    api.post<{ shots: Shot[]; version_index: number }>(
+      `/episodes/${episodeId}/storyboard/revert`, { version_index: versionIndex }
     ).then(r => r.data),
 }
 

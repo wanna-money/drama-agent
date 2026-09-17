@@ -75,6 +75,13 @@ class Episode(Base):
     screenplay_version_current: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0"
     )
+    # 分镜版本树(与 screenplay_versions 同构):storyboard_director 每次(重新)生成
+    # 追加一条,而不是覆盖 —— 否则"退回重新生成"会让上一版分镜(可能更满意、
+    # 已看过)无法再对比或恢复。
+    shots_versions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    shots_version_current: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
     status: Mapped[str] = mapped_column(String(50), default=LifecycleStatus.CREATED)
     # 不给硬编码模型名默认值:默认模型的权威是 provider 注册表的 effective_default("llm")
     # (规范 4),由接口层/runner 解析后写入。空串 = 未指定,runner 起跑时兜底解析。

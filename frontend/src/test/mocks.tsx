@@ -230,16 +230,29 @@ vi.mock('@douyinfe/semi-ui', () => ({
     Numeral: ({ children }: any) => <span>{children}</span>,
   },
   Card: Object.assign(
-    ({ children, title, headerExtraContent, footer, actions }: any) => (
+    ({ children, title, headerExtraContent, footer, actions, cover }: any) => (
       <div data-testid="card">
         {/* 标题单独打标:断言"分组顺序/组标题"需要能定位它,而不是全文搜文本 */}
         {title && <div><span data-testid="card-title">{title}</span>{headerExtraContent}</div>}
+        {cover}
         {children}
         {actions}
         {footer}
       </div>
     ),
     { Meta: ({ title, description }: any) => <div>{title}{description}</div> }
+  ),
+  // Collapse 替身:面板内容始终渲染(不模拟折叠/展开的可见性切换)——现有测试
+  // 只断言角色/造型的内容存在,不断言"折叠态下不可见",故不需要还原真实的
+  // 展开/收起交互,保持替身最简。
+  Collapse: Object.assign(
+    ({ children }: any) => <div data-testid="collapse">{children}</div>,
+    { Panel: ({ header, children }: any) => (
+      <div data-testid="collapse-panel">
+        <div data-testid="collapse-panel-header">{header}</div>
+        {children}
+      </div>
+    ) }
   ),
   VideoPlayer: ({ src }: any) => <video src={src} />,
   // onClick 必须转发:preview={false} 的用法(点图直接选中而非放大预览)靠它触发,
@@ -663,6 +676,8 @@ vi.mock('@douyinfe/semi-icons', () => ({
   IconArrowUp: () => <span>↑</span>,
   IconImage: () => <span>🖼</span>,
   IconAIImageLevel1: () => <span>✨</span>,
+  IconTickCircle: () => <span>✓</span>,
+  IconAlertTriangle: () => <span>!</span>,
 }))
 
 // Export for test access

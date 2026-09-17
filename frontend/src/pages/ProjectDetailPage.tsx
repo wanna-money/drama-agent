@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback, ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  Steps, Button, Tag, Spin, Toast, TextArea, Table, Modal, Typography, Card, Row, Col,
+  Button, Tag, Spin, Toast, TextArea, Table, Modal, Typography, Card, Row, Col,
   Space, Descriptions, List, Banner, Select, Checkbox,
 } from '@douyinfe/semi-ui'
 import {
@@ -17,6 +17,7 @@ import ScreenplayReviewPanel from '../components/ScreenplayReviewPanel'
 import CastReviewPanel, { CastDecision } from '../components/CastReviewPanel'
 import StoryTextPanel from '../components/StoryTextPanel'
 import GenerateFromScriptModal from '../components/GenerateFromScriptModal'
+import WorkflowSteps from '../components/WorkflowSteps'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -38,9 +39,15 @@ const STATUS_LABEL: Record<string, string> = {
   created: '待启动', starting: '启动中', analyzing: '故事分析中', story_analyzed: '分析完成',
   cast_resolved: '角色对齐中', cast_review: '确认角色', cast_confirmed: '角色已确认',
   screenplay_written: '剧本生成中', screenplay_review: '审核剧本', screenplay_approved: '剧本通过',
-  screenplay_revision_requested: '剧本修改中', storyboard_ready: '分镜完成',
+  screenplay_revision_requested: '剧本修改中',
+  // from_script 集(复用剧本/改编切片)图内直达分镜,起跑就是这个阶段(见
+  // pipeline_steps.py 的 storyboard 步 stages);漏了它会让顶部标签裸显英文阶段码。
+  storyboard_start: '分镜生成中', storyboard_ready: '分镜完成',
   prompts_ready: 'Prompt生成中', prompts_review: '审核Prompt', prompts_approved: 'Prompt确认',
-  prompts_revision_requested: 'Prompt修改中', videos_generated: '视频完成',
+  prompts_revision_requested: 'Prompt修改中',
+  // node 在真正开跑视频生成前落一次(video_generator.py),使"正在生成"独立可观测
+  // (与 videos_generated 的"已生成完毕"区分);漏了它会让顶部标签裸显英文阶段码。
+  videos_generating: '生成视频中', videos_generated: '视频完成',
   looks_assigned: '造型指派中', look_review: '审核服装造型', looks_approved: '造型确认',
   looks_revision_requested: '造型重排中',
   keyframes_ready: '关键帧生成中', keyframes_review: '审核关键帧', keyframes_approved: '关键帧确认',
@@ -94,6 +101,9 @@ export default function ProjectDetailPage() {
   const [story, setStory] = useState<Story | null>(null)
   // 用户手动点开的步骤;null = 跟随流水线当前步
   const [selectedStep, setSelectedStep] = useState<string | null>(null)
+  // 分镜审核态选中的历史版本;null = 当前版本(镜 ScreenplayReviewPanel 的 selectedVersion)
+  const [selectedShotsVersion, setSelectedShotsVersion] = useState<number | null>(null)
+  const [revertingShots, setRevertingShots] = useState(false)
   // 剧本之后,常驻上下文默认收起(见 contextCards);按卡片各自记展开态,用户可随时点开
   const [openContext, setOpenContext] = useState<Record<string, boolean>>({})
   const toggleContext = (key: string) =>
@@ -223,6 +233,7 @@ export default function ProjectDetailPage() {
     try {
       await workflowApi.resume(episodeId, { approved, notes: reviewNotesRef.current })
       setReviewNotesAndRef('')
+      setSelectedShotsVersion(null)
       Toast.success(approved ? '分镜已通过' : '已退回重新生成')
       await refreshStatus()
     } catch (e: unknown) {
@@ -230,6 +241,23 @@ export default function ProjectDetailPage() {
       Toast.error('操作失败: ' + (err?.response?.data?.detail || err?.message || '未知错误'))
     } finally {
       setReviewLoading(false)
+    }
+  }
+
+  /** 回退分镜到历史版本(镜 ScreenplayReviewPanel.handleRevert)。 */
+  const handleRevertShotsVersion = async (versionIndex: number) => {
+    if (!episodeId || revertingShots) return
+    setRevertingShots(true)
+    try {
+      await workflowApi.revertStoryboard(episodeId, versionIndex)
+      Toast.success('已恢复到该版本')
+      setSelectedShotsVersion(null)
+      await refreshStatus()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      Toast.error('恢复失败: ' + (err?.response?.data?.detail || err?.message || '未知错误'))
+    } finally {
+      setRevertingShots(false)
     }
   }
 
@@ -462,7 +490,30 @@ export default function ProjectDetailPage() {
   // 启动卡在开拍后**不消失**,改为显示"正在跑哪一步"。
   // 只在 created 态渲染的话,一点「开始制作」它就随状态变更整块卸载,而首个节点
   // 产出前右栏又没有别的内容 —— 用户看到的是一片空白,像是操作失败了。
-  const startedButIdle = isRunning && !status?.story_analysis
+  //
+  // 判据不能是"story_analysis 还没来":那只对 from_story 集成立(它的首个节点正是
+  // 故事分析)。from_script 集(复用剧本/改编切片)图内直达分镜,story_analysis
+  // 继承自 Story、开拍那一刻就非空 —— 若仍用这条判据,分镜生成中(LLM 调用,
+  // 可能耗时数十秒到几分钟)这张占位卡永远不出现,右栏只剩一张空的参考图卡,
+  // 用户看不到任何进度、也没有任何按钮(实测)。
+  // 改用"当前步(必是流水线首步,见下方 activeIndex===0 才会用到)有没有产出"
+  // 这一更general的判据,与各步卡片(storyboardCard 等)判空的条件同源。
+  const activeStepHasContent = (() => {
+    switch (activeKey) {
+      case 'analysis': return Boolean(status?.story_analysis)
+      case 'cast': return (status?.cast_pending?.length ?? 0) > 0
+      case 'screenplay': return Boolean(status?.screenplay)
+      case 'storyboard': return Boolean(status?.shots && status.shots.length > 0)
+      case 'looks': return Object.keys(status?.look_assignments || {}).length > 0
+      case 'prompts': return Boolean(status?.prompts && status.prompts.length > 0)
+      case 'keyframes':
+        return isAtKeyframesReview || (status?.prompts || []).some(p => !!p.keyframe_url)
+      case 'video': return Boolean(status?.videos && status.videos.length > 0)
+      case 'done': return Boolean(status?.assembled_video_path) || Boolean(status?.videos?.length)
+      default: return false
+    }
+  })()
+  const startedButIdle = isRunning && activeIndex === 0 && !activeStepHasContent
   const startCard = episode.status === 'created' ? (
     <Card title="项目准备就绪">
       <Row gutter={[0, 16]}>
@@ -601,6 +652,16 @@ export default function ProjectDetailPage() {
     />
   ) : null
 
+  // 分镜版本树:退回重新生成会整份覆盖 shots,故上一版分镜(可能更满意、已看过)
+  // 若不留痕就再也找不回来 —— 只在审核态且有多于 1 版时才展示版本下拉,
+  // 单版本时下拉除了显示"当前版本"什么都不做,是死 UI。
+  const shotsVersions = status?.shots_versions ?? []
+  const shotsViewIdx = selectedShotsVersion ?? (status?.shots_version_current ?? 0)
+  const shotsViewingCurrent = shotsViewIdx === (status?.shots_version_current ?? 0)
+  const shotsViewData = isAtStoryboardReview && selectedShotsVersion != null
+    ? (shotsVersions[shotsViewIdx]?.shots ?? status?.shots ?? [])
+    : (status?.shots ?? [])
+
   const storyboardCard = status?.shots && status.shots.length > 0 ? (
     <Card title={`分镜脚本 · ${status.shots.length} 个镜头${fmtDuration(status.total_duration_seconds)}`}
       headerExtraContent={
@@ -608,9 +669,28 @@ export default function ProjectDetailPage() {
           {status.duration_over_target && (
             <Text type="warning">总时长超出目标，建议退回重新生成</Text>
           )}
+          {/* 版本下拉:仅审核态且有历史版本才展示(镜 ScreenplayReviewPanel 的版本 Select,
+              label 截断同理,意见原文可能很长,不截断会把 Select 撑爆)。 */}
+          {isAtStoryboardReview && shotsVersions.length > 1 && (
+            <Select
+              value={shotsViewIdx}
+              optionList={shotsVersions.map((ver, i) => ({
+                value: i,
+                label: `版本${i + 1}·${(ver.label || '').trim().slice(0, 12)}${(ver.label || '').trim().length > 12 ? '…' : ''}`,
+              }))}
+              onChange={v => {
+                const idx = Number(v)
+                setSelectedShotsVersion(idx === (status?.shots_version_current ?? 0) ? null : idx)
+              }}
+            />
+          )}
+          {isAtStoryboardReview && !shotsViewingCurrent && (
+            <Button size="small" loading={revertingShots}
+              onClick={() => handleRevertShotsVersion(shotsViewIdx)}>恢复到此版本</Button>
+          )}
           {/* 分镜是人工卡点(storyboard_review),必须给通过/退回 —— 只提示"建议退回"
               却不给按钮,用户无从操作,整集卡在这里。 */}
-          {isAtStoryboardReview && (
+          {isAtStoryboardReview && shotsViewingCurrent && (
             <>
               <Button type="primary" size="small" loading={reviewLoading}
                 onClick={() => handleApproveStoryboard(true)}>通过，继续造型</Button>
@@ -623,7 +703,7 @@ export default function ProjectDetailPage() {
           )}
         </Space>
       }>
-      <Table size="small" dataSource={status.shots} rowKey="shot_id" pagination={false}
+      <Table size="small" dataSource={shotsViewData} rowKey="shot_id" pagination={false}
         expandRowByClick
         expandedRowRender={(row?: {
           location?: string; action?: string; dialogue?: string; color_temp?: string
@@ -1042,23 +1122,18 @@ export default function ProjectDetailPage() {
             {steps.length > 0 && (
               <Col span={24}>
                 <Card>
-                  {/* 可点性由每步的 onClick 决定,不在 Steps 上挂全局 onChange:Semi 会把
-                      Steps 的 onChange 注入每一个 Step,未推进到的步也会带上 clickable/hover
-                      样式,点了却无反应 —— 看起来能点必须与真的能点是同一个判据。 */}
-                  {/* current 跟随"正在查看的那一步":Steps 的 current 决定视觉焦点,而
-                      用户点了哪步就该看到焦点跟着走。各步自身的进度状态由 status 表达
-                      (finish/process/warning/error),两个通道各司其职、互不冒充。 */}
-                  <Steps direction="vertical" type="basic" current={activeIndex}>
-                    {steps.map((s, i) => (
-                      <Steps.Step
-                        key={s.key}
-                        title={s.label}
-                        description={fmtCost(s.cost, status?.cost_unpriced)}
-                        status={stepStatus(i)}
-                        onClick={stepReached(i) ? () => selectStep(i) : undefined}
-                      />
-                    ))}
-                  </Steps>
+                  {/* 可点性由每步的 onClick 决定:未推进到的步不传 onClick,WorkflowSteps
+                      据此渲染为不可点(data-clickable=false),看起来能点必须与真的能点是
+                      同一个判据。"正在查看哪一步"与"节点自身状态"两个通道各司其职:
+                      前者由 stepStatus 在 i === activeIndex 时返回 'process' 表达,
+                      后者(finish/warning/error)优先级更高、互不冒充。 */}
+                  <WorkflowSteps items={steps.map((s, i) => ({
+                    key: s.key,
+                    label: s.label,
+                    description: fmtCost(s.cost, status?.cost_unpriced),
+                    status: stepStatus(i),
+                    onClick: stepReached(i) ? () => selectStep(i) : undefined,
+                  }))} />
                 </Card>
               </Col>
             )}

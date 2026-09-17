@@ -195,6 +195,9 @@ async def get_workflow_status(episode_id: str, db: AsyncSession = Depends(get_db
         # 剧本版本树在 Episode 专用列(非 snapshot,见 Task 4):剧集页审核面板据此渲染版本下拉。
         "screenplay_versions": ep.screenplay_versions or [],
         "screenplay_version_current": ep.screenplay_version_current,
+        # 分镜版本树(同上,实体是 shots):分镜审核面板据此渲染版本下拉/回退。
+        "shots_versions": ep.shots_versions or [],
+        "shots_version_current": ep.shots_version_current,
         # 分镜总时长压到每镜下限仍超集级目标 → 前端提示"退回重新生成"(单一真相在后端收敛逻辑)
         "duration_over_target": bool(snapshot.get("duration_over_target", False)),
         # 流水线步骤(单一真相在后端 pipeline_steps);中断时以 paused_at 作当前步。
@@ -340,4 +343,38 @@ async def revert_screenplay(
     if version is None:                       # 守卫已确认集存在,理论到不了;防御性 404
         raise HTTPException(status_code=404, detail="Episode not found")
     await graph.aupdate_state(config, {"screenplay": version["screenplay"]})
+    return version
+
+
+# ── 分镜版本树(与上面剧本审核三端点同构,实体字段换成 shots) ───────────────
+
+async def _require_paused_storyboard_review(episode_id: str, db: AsyncSession):
+    """守卫:集存在 + 统一图暂停在 storyboard_review。返回 (ep, graph, config)。"""
+    ep = await _get_episode_or_404(db, episode_id)
+    graph = await get_graph()
+    config = {"configurable": {"thread_id": episode_id}}
+    state = await graph.aget_state(config)
+    next_nodes = tuple(state.next) if state and getattr(state, "next", ()) else ()
+    if "storyboard_review" not in next_nodes:
+        raise HTTPException(status_code=409, detail="分镜当前不处于待审核状态，无法回退版本")
+    return ep, graph, config
+
+
+class RevertShotsRequest(BaseModel):
+    version_index: int
+
+
+@router.post("/{episode_id}/storyboard/revert")
+async def revert_storyboard(
+    episode_id: str, req: RevertShotsRequest, db: AsyncSession = Depends(get_db)
+):
+    """回退到历史分镜版本:切换 current + 写回图状态(shots)。"""
+    _ep, graph, config = await _require_paused_storyboard_review(episode_id, db)
+    try:
+        version = await episode_service.set_current_shots_version(db, episode_id, req.version_index)
+    except IndexError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    if version is None:                       # 守卫已确认集存在,理论到不了;防御性 404
+        raise HTTPException(status_code=404, detail="Episode not found")
+    await graph.aupdate_state(config, {"shots": version["shots"]})
     return version

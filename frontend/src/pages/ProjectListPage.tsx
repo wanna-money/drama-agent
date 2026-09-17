@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Table, Button, Tag, Modal, Toast, Typography, Form } from '@douyinfe/semi-ui'
+import { Row, Col, Button, Card, Tag, Modal, Toast, Typography, Form } from '@douyinfe/semi-ui'
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface'
 import type { TagColor } from '@douyinfe/semi-ui/lib/es/tag'
-import { IconPlus } from '@douyinfe/semi-icons'
+import { IconPlus, IconDelete } from '@douyinfe/semi-icons'
 import PageShell, { PageEmpty, PageLoading } from '../components/PageShell'
 import { projectsApi, Project } from '../services/api'
 import { GENRES } from '../constants/genres'
 import { VISUAL_STYLES } from '../constants/visual_styles'
+import { genreCoverClass } from '../constants/genreGradients'
 
 // 展示名由 GENRES 派生 —— 取值权威在后端 db.enums.Genre,前端只做中文展示。
 // 各页都从这里派生,不各抄一份(抄了迟早分叉)。
@@ -64,71 +65,66 @@ export default function ProjectListPage() {
   }
   useEffect(loadProjects, [])
 
-  const columns = [
-    {
-      title: '作品名称',
-      dataIndex: 'title',
-      render: (v: string, r: Project) => (
-        <Text link onClick={() => navigate(`/projects/${r.id}`)}>{v}</Text>
-      ),
-    },
-    {
-      title: '类型',
-      dataIndex: 'genre',
-      render: (v: string) => <Text type="tertiary">{GENRE_LABEL[v] || v}</Text>,
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      render: (v: string) => <Tag color={STATUS_COLOR[v] || 'grey'}>{STATUS_LABEL[v] || v}</Tag>,
-    },
-    {
-      title: '总花费',
-      dataIndex: 'cost_total',
-      render: (v: number | undefined, r: Project) => (
-        <Text type="tertiary">{r.cost_unpriced ? '未定价' : `¥${(v ?? 0).toFixed(2)}`}</Text>
-      ),
-    },
-    {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      render: (v: string) => <Text type="tertiary">{new Date(v).toLocaleString('zh-CN')}</Text>,
-    },
-    {
-      title: '',
-      render: (_: unknown, r: Project) => {
-        const isActive = !['created', 'completed', 'failed', 'assembly_failed'].includes(r.status)
-        return (
-          <Button
-            type="danger"
-            theme="borderless"
-            onClick={() => {
-              Modal.confirm({
-                title: '确认删除',
-                content: isActive
-                  ? `「${r.title}」正在制作中，删除后将中断流程且无法恢复，确定继续？`
-                  : `删除「${r.title}」后无法恢复，确定继续？`,
-                okType: 'danger',
-                okText: '删除',
-                cancelText: '取消',
-                onOk: async () => {
-                  try {
-                    await projectsApi.delete(r.id)
-                    setProjects(ps => ps.filter(p => p.id !== r.id))
-                    Toast.success('已删除')
-                  } catch {
-                    Toast.error('删除失败，请重试')
-                  }
-                },
-              })
-            }}
-          >
-            删除
-          </Button>
-        )
+  const confirmDelete = (p: Project) => {
+    const isActive = !['created', 'completed', 'failed', 'assembly_failed'].includes(p.status)
+    Modal.confirm({
+      title: '确认删除',
+      content: isActive
+        ? `「${p.title}」正在制作中，删除后将中断流程且无法恢复，确定继续？`
+        : `删除「${p.title}」后无法恢复，确定继续？`,
+      okType: 'danger',
+      okText: '删除',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await projectsApi.delete(p.id)
+          setProjects(ps => ps.filter(x => x.id !== p.id))
+          Toast.success('已删除')
+        } catch {
+          Toast.error('删除失败，请重试')
+        }
       },
-    },
-  ]
+    })
+  }
+
+  const renderCard = (p: Project) => (
+    <Card
+      key={p.id}
+      className="project-card"
+      cover={
+        <div className={`project-cover ${genreCoverClass(p.genre)}`}>
+          <span className="project-cover-label">{GENRE_LABEL[p.genre] || p.genre}</span>
+        </div>
+      }
+      actions={[
+        <Button
+          key="delete" className="project-card-delete" type="danger" theme="borderless"
+          icon={<IconDelete />} onClick={() => confirmDelete(p)}
+        >删除</Button>,
+      ]}
+    >
+      <Row gutter={[0, 8]}>
+        <Col span={24}>
+          <Text strong link onClick={() => navigate(`/projects/${p.id}`)}>{p.title}</Text>
+        </Col>
+        <Col span={24}>
+          <Tag color={STATUS_COLOR[p.status] || 'grey'}>{STATUS_LABEL[p.status] || p.status}</Tag>
+        </Col>
+        <Col span={24}>
+          <Row type="flex" justify="space-between">
+            <Col>
+              <Text type="tertiary" size="small">
+                {p.cost_unpriced ? '未定价' : `¥${(p.cost_total ?? 0).toFixed(2)}`}
+              </Text>
+            </Col>
+            <Col>
+              <Text type="tertiary" size="small">{new Date(p.created_at).toLocaleDateString('zh-CN')}</Text>
+            </Col>
+          </Row>
+        </Col>
+      </Row>
+    </Card>
+  )
 
   return (
     <PageShell
@@ -147,7 +143,13 @@ export default function ProjectListPage() {
       ) : projects.length === 0 ? (
         <PageEmpty title="还没有作品" description="点击「新建项目」开始您的第一部 AI 短剧创作" />
       ) : (
-        <Table columns={columns} dataSource={projects} rowKey="id" pagination={{ pageSize: 10 }} />
+        <Row gutter={[16, 16]}>
+          {projects.map(p => (
+            <Col key={p.id} xs={24} sm={12} md={8} lg={6}>
+              {renderCard(p)}
+            </Col>
+          ))}
+        </Row>
       )}
 
       <Modal

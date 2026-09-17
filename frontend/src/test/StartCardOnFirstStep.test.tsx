@@ -112,4 +112,25 @@ describe('启动卡只在流水线首步', () => {
     await waitFor(() => expect(screen.getByText(/分镜脚本 ·/)).toBeInTheDocument())
     expect(screen.queryByText('项目准备就绪')).not.toBeInTheDocument()
   })
+
+  // 复用剧本的集(from_script)首步是分镜(不是故事分析),而它的 story_analysis
+  // 继承自 Story、开拍那一刻就非空 —— 若进度占位卡仍按"story_analysis 还没来"判断,
+  // 分镜生成中(耗时的 LLM 调用)这张卡永远不出现,右栏没有任何进度提示与按钮(实测)。
+  it('复用剧本的集在分镜生成中,显示进度占位卡而非一片空白', async () => {
+    seed(FROM_SCRIPT, 'running', {
+      current_stage: 'storyboard_start', paused_at: null,
+      db_status: 'running',
+      shots: [],
+      story_analysis: {
+        title: 'T', genre: '现代剧', tone: '轻松', themes: [],
+        plot_summary: '继承自故事的梗概', characters: [], setting: '都市',
+      },
+      pipeline: { steps: FROM_SCRIPT, current: 'storyboard' },
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('制作已启动')).toBeInTheDocument())
+    // 顶部标签与卡内文案都会出现该词,用 getAllByText 只断言"至少出现"(与
+    // ProjectDetailPage.test.tsx 同例的多处命中场景一致)
+    expect(screen.getAllByText(/分镜生成中/).length).toBeGreaterThan(0)
+  })
 })
