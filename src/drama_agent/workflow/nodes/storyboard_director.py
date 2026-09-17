@@ -14,6 +14,14 @@ from drama_agent.workflow.prompt_rules import system_prompt
 
 logger = structlog.get_logger()
 
+# 打斗/法术类 craft 知识只在题材命中时才检索——这批文档是仙侠/玄幻专项内容
+# (招式模板、法术公式、终极大招、长镜头打戏铁律),塞给现代剧/爱情剧等无战斗
+# 元素的题材只会稀释 prompt 里真正有用的通用方法论、徒增 token,对产出没有帮助。
+_GENRE_COMBAT_KNOWLEDGE_KINDS = ("xianxia_combat_moves", "xianxia_spell_techniques",
+                                 "vfx_spell_prompt_guide", "epic_manifestation_prompts",
+                                 "long_take_fight_prompts")
+_COMBAT_GENRES = {"fantasy", "action"}
+
 SYSTEM = system_prompt("""You are a professional film director and storyboard artist.
 Break screenplays into individual shots for video production.
 Each shot's duration_seconds is the true narrative length this beat should last on screen —
@@ -47,13 +55,16 @@ def _color_temp_line() -> str:
 
 def build_prompt(
     screenplay: str, analysis: dict, target_seconds: int | None = None,
-    notes: str | None = None, cast_names: list[str] | None = None,
+    notes: str | None = None, cast_names: list[str] | None = None, genre: str = "",
 ) -> tuple[str, str]:
     """target_seconds:全片目标时长(秒),约束镜头总时长;缺省取 config 的 target_episode_seconds。
     notes:分镜被打回重做时的人工意见,拼进 prompt 尾部引导重生成(仿 prompt_engineer)。
 
     cast_names:已确认阵容,作为 shots[].characters 的**受约束取值**下发。名单外的名字
     进了 characters,下游按 character_id 取造型与外貌就会落空(该角色形象逐镜漂移)。
+
+    genre:决定是否额外检索仙侠/玄幻打斗类 craft 知识(见 _COMBAT_GENRES)——
+    非战斗题材不该被这批专项内容稀释掉更该优先的通用镜头方法论。
 
     不再需要 model_ref:duration_seconds 是纯叙事时长,与视频模型的生成能力无关
     (生成时长由 workflow.constants.generation_duration_for 在 prompt_engineer 阶段
@@ -85,6 +96,12 @@ def build_prompt(
     if blocking:
         methodology_block += f"\n\nMulti-character blocking methodology:\n{blocking}"
 
+    if genre in _COMBAT_GENRES:
+        for kind in _GENRE_COMBAT_KNOWLEDGE_KINDS:
+            content = "\n\n".join(knowledge_store.retrieve(kind))
+            if content:
+                methodology_block += f"\n\nCombat/VFX reference ({kind}):\n{content}"
+
     user_prompt = f"""Break this screenplay into individual production shots.
 
 SCREENPLAY:
@@ -107,8 +124,11 @@ Rules for shots:
 - Use camera movements: {_camera_moves_line()}
 - lighting 取值: {_lighting_line()}
 - color_temp 取值: {_color_temp_line()}
-- **同一场景(scene_number 相同)的 lighting 与 color_temp 必须一致**:
-  同一场戏里光线不该在镜间跳变。要变光就换场景,或让它随剧情推进(白天→黄昏)整段迁移
+- **同一场景(scene_number 相同)的 lighting、color_temp 与 location 必须一致**:
+  同一场戏里光线不该在镜间跳变,location 也不要写成"同一地点 - 继续"这种变体
+  (如"外景 青云宗论道台 - 黄昏"与"外景 青云宗论道台 - 继续")—— 同场次内每镜
+  location 原样重复即可,不需要额外区分。要变光/换地点就换场景,或让它随剧情
+  推进(白天→黄昏)整段迁移
 - **一镜内有多个明显节拍时**(如击中 + 跌出),用 `beats` 按顺序列出各节拍
   (自然语言,写明各自占多久),`duration_seconds` 给这些节拍的总长。
   例:`duration_seconds: 2`,`beats: ["前 0.4 秒:拳头击中下颌,头部急偏",
@@ -204,29 +224,36 @@ def _filter_cast(names, cast_names: list[str], shot_idx: int) -> list[str]:
     return kept
 
 
-def _unify_scene_light(shots: list[dict]) -> list[dict]:
-    """把同一场景内的 lighting / color_temp 统一为该场景首镜的取值。
+def _unify_scene_fields(shots: list[dict]) -> list[dict]:
+    """把同一场景内的 lighting / color_temp / location 统一为该场景首镜的取值。
 
-    prompt 里的"同场景光影一致"是软约束,LLM 仍会逐镜漂移(与阵容名单同理,见 _filter_cast)。
-    不统一的话,同一场戏的光线在镜间跳变 —— 这正是加这两个字段要消除的现象,只声明不收敛
-    等于没做。以首镜为准而不取众数:首镜定调是拍摄惯例,也让结果可预测。
+    prompt 里的"同场景一致"是软约束,LLM 仍会逐镜漂移(与阵容名单同理,见 _filter_cast)。
+    不统一的话,同一场戏的光线在镜间跳变、地点文案也会漂(如首镜写"外景 青云宗论道台 -
+    黄昏",同场次镜写成"外景 青云宗论道台 - 继续")—— 这正是加这些字段要消除的现象,
+    只声明不收敛等于没做。以首镜为准而不取众数:首镜定调是拍摄惯例,也让结果可预测。
+
+    location 一并收敛的直接收益:reference_service.detected() 按 shots[].location
+    的字面值去重生成背景参考图占位,同场次里哪怕只有一镜漂了文案,也会在参考图面板里
+    多出一条本不存在的"新地点"——收敛在这里比在参考图那层做模糊匹配更根本。
     """
-    first: dict[int, tuple[str, str]] = {}
+    first: dict[int, tuple[str, str, str]] = {}
     out: list[dict] = []
     for s in shots:
         scene = s.get("scene_number", 1)
         if scene not in first:
-            first[scene] = (s.get("lighting", ""), s.get("color_temp", ""))
+            first[scene] = (
+                s.get("lighting", ""), s.get("color_temp", ""), s.get("location", ""))
             out.append(s)
             continue
-        light, temp = first[scene]
-        if (s.get("lighting"), s.get("color_temp")) != (light, temp):
+        light, temp, location = first[scene]
+        if (s.get("lighting"), s.get("color_temp"), s.get("location")) != (
+                light, temp, location):
             logger.warning(
-                "storyboard: unified scene lighting to first shot of scene",
-                scene=scene, got=(s.get("lighting"), s.get("color_temp")),
-                unified_to=(light, temp),
+                "storyboard: unified scene fields to first shot of scene",
+                scene=scene, got=(s.get("lighting"), s.get("color_temp"), s.get("location")),
+                unified_to=(light, temp, location),
             )
-        out.append({**s, "lighting": light, "color_temp": temp})
+        out.append({**s, "lighting": light, "color_temp": temp, "location": location})
     return out
 
 
@@ -326,7 +353,7 @@ async def _generate_shots(
     """
     system, user_prompt = build_prompt(
         state["screenplay"], state.get("story_analysis") or {},
-        target_seconds, notes=notes, cast_names=cast_names,
+        target_seconds, notes=notes, cast_names=cast_names, genre=state.get("genre", ""),
     )
 
     shots_data = await llm_service.complete_json(system, user_prompt, temperature=0.3, model=state.get("llm_model"))
@@ -393,7 +420,7 @@ async def storyboard_director_node(state: DramaState, target_seconds: int | None
     # 把不合格的原因追加进 notes 引导重生成;第二次仍不合格则照常继续(记 warning,
     # 不阻断 —— 卡住整条流水线比节奏平更糟),交后面的 duration_over_target 提示兜底。
     # cast:list[ShotDict] 是 list[dict] 的安全放宽(_rhythm_ok 只读 duration_seconds),
-    # mypy 因不变性不自动放宽(与下方 _unify_scene_light 同例)。
+    # mypy 因不变性不自动放宽(与下方 _unify_scene_fields 同例)。
     reason = _rhythm_ok(cast(list[dict], shots), target_seconds)
     if reason:
         logger.warning("storyboard: rhythm check failed, retrying once",
@@ -405,8 +432,8 @@ async def storyboard_director_node(state: DramaState, target_seconds: int | None
             logger.warning("storyboard: rhythm check still failing after retry",
                            reason=reason, shots=len(shots))
 
-    # 同场景光影收敛(prompt 约束是软的,须在落状态前统一)
-    unified = _unify_scene_light(cast(list[dict], shots))
+    # 同场景光影/地点收敛(prompt 约束是软的,须在落状态前统一)
+    unified = _unify_scene_fields(cast(list[dict], shots))
     # 总时长收敛:超目标从最长镜头逐秒削峰,镜头一个不少;削到人人都在 1 秒仍超
     # 只标记不阻断(交审核决策)。
     # cast:list[ShotDict] 是 list[dict] 的安全放宽(收敛只读 duration_seconds),mypy 因不变性不自动放宽。

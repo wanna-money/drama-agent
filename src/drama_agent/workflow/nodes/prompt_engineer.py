@@ -15,6 +15,11 @@ Focus on visual elements: subject, action, environment, lighting, camera, mood, 
 
 logger = structlog.get_logger()
 
+# 光影措辞按题材有专属方向(仙侠/玄幻→丁达尔光/轮廓光,悬疑→大光比阴影……),
+# 见 knowledge/craft/lighting_prompt_guide.md 的题材对照表;检索一次全节点共用,
+# 不逐镜重复取(该知识与具体镜头无关,只与整集题材有关)。
+_LIGHTING_KNOWLEDGE_GENRES = {"fantasy", "action", "thriller", "romance"}
+
 # 未上传参考图/模型无专属指引时的默认负向提示词(中文,与输出语言规则一致)
 DEFAULT_NEGATIVE_PROMPT = "模糊、画质低、水印、字幕、文字叠加、肢体畸变"
 
@@ -68,6 +73,7 @@ def build_prompt(
     notes: str | None = None,
     supports_timestamp_prompt: bool = False,
     visual_style: str = "",
+    lighting_knowledge: list[str] | None = None,
 ) -> tuple[str, str]:
     """构造视频 prompt 生成的 (system, user)。RAG 结果由调用方查好后注入,保持纯函数。
     notes 是人工审核退回时的修改意见(见 prompt_engineer_node);首次生成时为 None/空,
@@ -76,6 +82,10 @@ def build_prompt(
     supports_timestamp_prompt 决定镜内时间轴的指令区文案:目标模型不认它时必须明写
     禁止,否则模型会把该镜头写成"镜头1/镜头2"两段动作,而不认时间轴的模型只响应
     镜头序号,第二段动作会被静默忽略(成片里凭空少一半内容)。
+
+    lighting_knowledge:按题材检索的光影关键词指南(见 knowledge/craft/
+    lighting_prompt_guide.md 的题材对照表),由调用方按 genre 决定是否传入——
+    不是每个题材都有专属光影方向,该字段可为空。
     """
     # 光影查表译成中文短语,而不是把枚举值原样丢给 LLM 自己翻译 —— 后者每镜译法不同,
     # 分镜声明的"同场景光影一致"到 prompt 层就散掉了。
@@ -100,6 +110,7 @@ Shot info:
 - Type: {shot["shot_type"]} ({SHOT_TYPE_DESC.get(shot["shot_type"], shot["shot_type"])})
 - Camera: {shot["camera_movement"]}
 - 光影(必须写进 prompt,不得改成别的方案): {light_line}
+{f"- 该题材的光影关键词参考(用于把上面的光影具体化成更有画面感的措辞): {'; '.join(lighting_knowledge)}" if lighting_knowledge else ""}
 {f"- 视觉风格(必须写进 prompt,不得改成别的方案): {style_line}" if style_line else ""}
 - Duration: {shot["duration_seconds"]}s
 - Location: {shot["location"]}
@@ -170,6 +181,11 @@ async def prompt_engineer_node(state: DramaState) -> dict:
     guide_key = _guide_key_for(provider)
     guides = knowledge_store.retrieve("prompt_guide", key=guide_key) if guide_key else []
     timestamp_capable = _supports_timestamp_prompt(model_ref)
+    genre = state.get("genre", "")
+    lighting_knowledge = (
+        knowledge_store.retrieve("lighting_prompt_guide")
+        if genre in _LIGHTING_KNOWLEDGE_GENRES else []
+    )
     for i, shot in enumerate(shots):
         # 领域知识:Dify 检索(失败降级常量),按镜头类型/运镜取
         tmpl_key = f"{guide_key}:{shot['shot_type']}" if guide_key else shot["shot_type"]
@@ -196,7 +212,8 @@ async def prompt_engineer_node(state: DramaState) -> dict:
         system, user_prompt = build_prompt(
             shot, char_descriptions, templates, cin_rules, provider, guides, notes=revision_notes,
             supports_timestamp_prompt=timestamp_capable,
-            visual_style=state.get("visual_style", ""))
+            visual_style=state.get("visual_style", ""),
+            lighting_knowledge=lighting_knowledge)
 
         # **逐镜重试**,而不是让一个镜头的偶发空返回作废整批(规范 6:单元素失败
         # 不得拖垮整体)。模型偶尔不返回 prompt_text —— 实测一次 12 镜的运行里
